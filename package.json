@@ -1,5 +1,5 @@
 {
-  "name": "dev.terrorized.ToggleAnimationGenerator",
+  "name": "dev.terrorized.toggleanimationgenerator",
   "displayName": "Toggle Animation Generator",
   "version": "1.0.2",
   "description": "Script to automaticlly make On/Off animations for gameobjects.",
