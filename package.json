@@ -1,22 +1,22 @@
 {
-  "name": "dev.sleightly.template",
-  "displayName": "JS-Template",
-  "version": "0.0.0",
-  "description": "A VPM Package Template",
-  "url": "https://github.com/JustSleightly/VPM-Package-Template",
+  "name": "dev.terrorized.ToggleAnimationGenerator",
+  "displayName": "Toggle Animation Generator",
+  "version": "1.0.2",
+  "description": "Script to automaticlly make On/Off animations for gameobjects.",
+  "url": "https://github.com/iTerrorized/Toggle-Animation-Generator",
   "vpmDependencies": {
     "com.vrchat.avatars": "^3.10.0"
   },
   "type": "tool",
   "keywords": [
-    "JustSleightly",
-    "Sleightly",
+    "Terrorized",
+    "Animations",
     "VRChat",
     "Template"
   ],
   "author": {
-    "name": "JustSleightly",
-    "email": "just@sleightly.dev",
-    "url": "https://just.sleightly.dev"
+    "name": "Terrorized",
+    "email": "xterrorized@outlook.com",
+    "url": "https://terrorized.dev"
   }
 }
