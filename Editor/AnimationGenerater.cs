@@ -26,7 +26,16 @@ public class AnimationGeneratorTool
         ShowNameDialog((name) => CreateOnOffAnimations(targetObject, name, true));
     }
 
-    [MenuItem("GameObject/Terrorized/Create Int", false, 12)]
+    [MenuItem("GameObject/Terrorized/Generate OnOff (2 Frame Animation)", false, 12)]
+    private static void GenerateOnOff2Frame(MenuCommand menuCommand)
+    {
+        GameObject targetObject = (GameObject)menuCommand.context;
+        if (targetObject == null) return;
+
+        ShowNameDialog((name) => CreateOnOff2FrameAnimation(targetObject, name));
+    }
+
+    [MenuItem("GameObject/Terrorized/Create Int", false, 13)]
     private static void CreateInt(MenuCommand menuCommand)
     {
         GameObject[] selectedObjects = Selection.gameObjects;
@@ -35,7 +44,7 @@ public class AnimationGeneratorTool
         ShowIntAnimationDialog(selectedObjects, false);
     }
 
-    [MenuItem("GameObject/Terrorized/Create Int with Off", false, 13)]
+    [MenuItem("GameObject/Terrorized/Create Int with Off", false, 14)]
     private static void CreateIntWithOff(MenuCommand menuCommand)
     {
         GameObject[] selectedObjects = Selection.gameObjects;
@@ -81,6 +90,51 @@ public class AnimationGeneratorTool
         AssetDatabase.Refresh();
 
         EditorUtility.DisplayDialog("Success", $"Created animations:\n{baseName}Off\n{baseName}On", "OK");
+    }
+
+    private static void CreateOnOff2FrameAnimation(GameObject targetObject, string baseName)
+    {
+        // Create folder structure if needed
+        if (!AssetDatabase.IsValidFolder("Assets/!Terrorized"))
+            AssetDatabase.CreateFolder("Assets", "!Terrorized");
+        if (!AssetDatabase.IsValidFolder(ASSET_FOLDER))
+            AssetDatabase.CreateFolder("Assets/!Terrorized", "GeneratedAssets");
+
+        string savePath = Path.Combine(ASSET_FOLDER, baseName + ".anim");
+        string targetPath = GetGameObjectPath(targetObject);
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = baseName;
+
+        // Two keyframes at 60fps: frame 0 = On (1.0), frame 1 = Off (0.0)
+        float frame1Time = 1f / 60f;
+
+        AnimationCurve curve = new AnimationCurve();
+        curve.AddKey(new Keyframe(0f, 1f));
+        curve.AddKey(new Keyframe(frame1Time, 0f));
+
+        // Set constant/stepped tangents so there is no interpolation between frames
+        AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyLeftTangentMode(curve, 1, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyRightTangentMode(curve, 1, AnimationUtility.TangentMode.Constant);
+
+        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(
+            targetPath,
+            typeof(GameObject),
+            "m_IsActive"
+        );
+        AnimationUtility.SetEditorCurve(clip, binding, curve);
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog("Success", $"Created 2-frame animation:\n{baseName}\n\nFrame 0: On\nFrame 1: Off", "OK");
     }
 
     public static void CreateIntAnimations(GameObject[] objects, string prefix, string[] animNames, bool includeOffAnimation)
@@ -336,7 +390,7 @@ public class IntAnimationWindow : EditorWindow
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField($"{i}:", GUILayout.Width(30));
             EditorGUILayout.LabelField(objects[i].name, GUILayout.Width(150));
-            EditorGUILayout.LabelField("→", GUILayout.Width(20));
+            EditorGUILayout.LabelField("->", GUILayout.Width(20));
             animationNames[i] = EditorGUILayout.TextField(animationNames[i]);
             EditorGUILayout.EndHorizontal();
         }
@@ -358,11 +412,11 @@ public class IntAnimationWindow : EditorWindow
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
         for (int i = 0; i < objects.Length; i++)
         {
-            EditorGUILayout.LabelField($"• {prefix}{animationNames[i]}.anim", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"* {prefix}{animationNames[i]}.anim", EditorStyles.miniLabel);
         }
         if (includeOffAnimation)
         {
-            EditorGUILayout.LabelField($"• {prefix}Off.anim", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"* {prefix}Off.anim", EditorStyles.miniLabel);
         }
         EditorGUILayout.EndVertical();
 
