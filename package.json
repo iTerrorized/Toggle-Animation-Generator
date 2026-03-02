@@ -1,7 +1,7 @@
 {
   "name": "dev.terrorized.toggleanimationgenerator",
   "displayName": "Toggle Animation Generator",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Script to automaticlly make On/Off animations for gameobjects.",
   "url": "https://github.com/iTerrorized/Toggle-Animation-Generator",
   "vpmDependencies": {
