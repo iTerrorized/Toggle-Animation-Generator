@@ -2,6 +2,8 @@ using UnityEngine;
 using UnityEditor;
 using UnityEditor.Animations;
 using System.IO;
+using System.Collections.Generic;
+using System.Linq;
 
 public class AnimationGeneratorTool
 {
@@ -53,6 +55,14 @@ public class AnimationGeneratorTool
         ShowIntAnimationDialog(selectedObjects, true);
     }
 
+    [MenuItem("GameObject/Terrorized/Create Single DBT Toggles", false, 15)]
+    private static void CreateSingleDBTToggles(MenuCommand menuCommand)
+    {
+        GameObject[] selected = Selection.gameObjects;
+        if (selected == null || selected.Length == 0) return;
+        CreateSingleDBTTogglesWindow.Show(selected);
+    }
+
     private static void ShowNameDialog(System.Action<string> onConfirm)
     {
         AnimationNameWindow.Show(onConfirm);
@@ -65,7 +75,6 @@ public class AnimationGeneratorTool
 
     private static void CreateOnOffAnimations(GameObject targetObject, string baseName, bool useDissolve)
     {
-        // Create folder if it doesn't exist
         if (!AssetDatabase.IsValidFolder(ASSET_FOLDER))
         {
             AssetDatabase.CreateFolder("Assets/!Terrorized", "GeneratedAssets");
@@ -74,13 +83,11 @@ public class AnimationGeneratorTool
         string pathOff = Path.Combine(ASSET_FOLDER, baseName + "Off.anim");
         string pathOn = Path.Combine(ASSET_FOLDER, baseName + "On.anim");
 
-        // Create Off animation
         AnimationClip offClip = new AnimationClip();
         offClip.name = baseName + "Off";
         SetupAnimationClip(offClip, targetObject, false, useDissolve);
         AssetDatabase.CreateAsset(offClip, pathOff);
 
-        // Create On animation
         AnimationClip onClip = new AnimationClip();
         onClip.name = baseName + "On";
         SetupAnimationClip(onClip, targetObject, true, useDissolve);
@@ -94,7 +101,6 @@ public class AnimationGeneratorTool
 
     private static void CreateOnOff2FrameAnimation(GameObject targetObject, string baseName)
     {
-        // Create folder structure if needed
         if (!AssetDatabase.IsValidFolder("Assets/!Terrorized"))
             AssetDatabase.CreateFolder("Assets", "!Terrorized");
         if (!AssetDatabase.IsValidFolder(ASSET_FOLDER))
@@ -106,14 +112,12 @@ public class AnimationGeneratorTool
         AnimationClip clip = new AnimationClip();
         clip.name = baseName;
 
-        // Two keyframes at 60fps: frame 0 = On (1.0), frame 1 = Off (0.0)
         float frame1Time = 1f / 60f;
 
         AnimationCurve curve = new AnimationCurve();
         curve.AddKey(new Keyframe(0f, 1f));
         curve.AddKey(new Keyframe(frame1Time, 0f));
 
-        // Set constant/stepped tangents so there is no interpolation between frames
         AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
         AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
         AnimationUtility.SetKeyLeftTangentMode(curve, 1, AnimationUtility.TangentMode.Constant);
@@ -139,13 +143,11 @@ public class AnimationGeneratorTool
 
     public static void CreateIntAnimations(GameObject[] objects, string prefix, string[] animNames, bool includeOffAnimation)
     {
-        // Create folder if it doesn't exist
         if (!AssetDatabase.IsValidFolder(ASSET_FOLDER))
         {
             AssetDatabase.CreateFolder("Assets/!Terrorized", "GeneratedAssets");
         }
 
-        // Create an animation for each object
         for (int i = 0; i < objects.Length; i++)
         {
             string animName = prefix + animNames[i];
@@ -157,7 +159,6 @@ public class AnimationGeneratorTool
             AssetDatabase.CreateAsset(clip, path);
         }
 
-        // Create "Off" animation if requested
         if (includeOffAnimation)
         {
             string offAnimName = prefix + "Off";
@@ -165,7 +166,7 @@ public class AnimationGeneratorTool
 
             AnimationClip offClip = new AnimationClip();
             offClip.name = offAnimName;
-            SetupIntAnimationClip(offClip, objects, -1); // -1 means all off
+            SetupIntAnimationClip(offClip, objects, -1);
             AssetDatabase.CreateAsset(offClip, offPath);
         }
 
@@ -182,7 +183,6 @@ public class AnimationGeneratorTool
     {
         string targetPath = GetGameObjectPath(targetObject);
 
-        // Set IsActive curve
         AnimationCurve isActiveCurve = AnimationCurve.EaseInOut(0, isOn ? 1 : 0, 0, isOn ? 1 : 0);
         isActiveCurve.keys[0].inTangent = float.PositiveInfinity;
         isActiveCurve.keys[0].outTangent = float.PositiveInfinity;
@@ -194,7 +194,6 @@ public class AnimationGeneratorTool
         );
         AnimationUtility.SetEditorCurve(clip, isActiveBinding, isActiveCurve);
 
-        // Set DissolveAlpha curve if needed
         if (useDissolve)
         {
             AnimationCurve dissolveCurve = AnimationCurve.Linear(0, isOn ? 0 : 1, 0, isOn ? 0 : 1);
@@ -209,7 +208,6 @@ public class AnimationGeneratorTool
             AnimationUtility.SetEditorCurve(clip, dissolveBinding, dissolveCurve);
         }
 
-        // Set animation settings
         AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
         settings.loopTime = false;
         AnimationUtility.SetAnimationClipSettings(clip, settings);
@@ -217,11 +215,10 @@ public class AnimationGeneratorTool
 
     private static void SetupIntAnimationClip(AnimationClip clip, GameObject[] objects, int activeIndex)
     {
-        // For each object, set its IsActive state
         for (int i = 0; i < objects.Length; i++)
         {
             string targetPath = GetGameObjectPath(objects[i]);
-            bool isActive = (i == activeIndex); // activeIndex = -1 means all off
+            bool isActive = (i == activeIndex);
 
             AnimationCurve isActiveCurve = AnimationCurve.EaseInOut(0, isActive ? 1 : 0, 0, isActive ? 1 : 0);
             isActiveCurve.keys[0].inTangent = float.PositiveInfinity;
@@ -235,19 +232,215 @@ public class AnimationGeneratorTool
             AnimationUtility.SetEditorCurve(clip, isActiveBinding, isActiveCurve);
         }
 
-        // Set animation settings
         AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
         settings.loopTime = false;
         AnimationUtility.SetAnimationClipSettings(clip, settings);
     }
 
+    // ─── DBT Toggle helpers ───────────────────────────────────────────────────
+
+    public static List<(BlendTree tree, string label)> FindDirectBlendTrees(AnimatorController controller)
+    {
+        var results = new List<(BlendTree, string)>();
+        foreach (var layer in controller.layers)
+            FindDirectBlendTreesInSM(layer.stateMachine, layer.name, results);
+        return results;
+    }
+
+    private static void FindDirectBlendTreesInSM(AnimatorStateMachine sm, string path, List<(BlendTree, string)> results)
+    {
+        foreach (var stateInfo in sm.states)
+        {
+            if (stateInfo.state.motion is BlendTree bt)
+                CollectDirectBlendTrees(bt, $"{path}/{stateInfo.state.name}", results);
+        }
+        foreach (var subSM in sm.stateMachines)
+            FindDirectBlendTreesInSM(subSM.stateMachine, $"{path}/{subSM.stateMachine.name}", results);
+    }
+
+    private static void CollectDirectBlendTrees(BlendTree tree, string path, List<(BlendTree, string)> results)
+    {
+        if (tree.blendType == BlendTreeType.Direct)
+            results.Add((tree, path));
+        foreach (var child in tree.children)
+        {
+            if (child.motion is BlendTree childTree)
+                CollectDirectBlendTrees(childTree, $"{path}/{childTree.name}", results);
+        }
+    }
+
+    public static void EnsureAnimatorParameter(AnimatorController controller, string name)
+    {
+        foreach (var param in controller.parameters)
+            if (param.name == name) return;
+        controller.AddParameter(name, AnimatorControllerParameterType.Float);
+    }
+
+    public static List<(string smrPath, string shapeName)> FindClippingBlendshapes(string displayName, Transform animatorRoot)
+    {
+        var results = new List<(string, string)>();
+        string prefix = "CLIPPING/" + displayName;
+        var smrs = animatorRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+        foreach (var smr in smrs)
+        {
+            var mesh = smr.sharedMesh;
+            if (mesh == null) continue;
+            string smrPath = GetTransformPath(smr.transform, animatorRoot);
+            for (int i = 0; i < mesh.blendShapeCount; i++)
+            {
+                string shapeName = mesh.GetBlendShapeName(i);
+                if (shapeName.StartsWith(prefix))
+                    results.Add((smrPath, shapeName));
+            }
+        }
+        return results;
+    }
+
+    private static string GetTransformPath(Transform target, Transform root)
+    {
+        string path = "";
+        Transform current = target;
+        while (current != root)
+        {
+            path = path == "" ? current.name : current.name + "/" + path;
+            current = current.parent;
+        }
+        return path;
+    }
+
+    private static void EnsureAssetFolder()
+    {
+        if (!AssetDatabase.IsValidFolder("Assets/!Terrorized"))
+            AssetDatabase.CreateFolder("Assets", "!Terrorized");
+        if (!AssetDatabase.IsValidFolder(ASSET_FOLDER))
+            AssetDatabase.CreateFolder("Assets/!Terrorized", "GeneratedAssets");
+    }
+
+    public static AnimationClip CreateDBTToggleAnimation(
+        GameObject obj, string clipName, bool isOn,
+        List<(string smrPath, string shapeName)> blendshapes)
+    {
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
+        string targetPath = GetGameObjectPath(obj);
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        AnimationCurve isActiveCurve = new AnimationCurve();
+        isActiveCurve.AddKey(new Keyframe(0f, isOn ? 1f : 0f));
+        AnimationUtility.SetKeyLeftTangentMode(isActiveCurve, 0, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyRightTangentMode(isActiveCurve, 0, AnimationUtility.TangentMode.Constant);
+
+        EditorCurveBinding isActiveBinding = EditorCurveBinding.FloatCurve(targetPath, typeof(GameObject), "m_IsActive");
+        AnimationUtility.SetEditorCurve(clip, isActiveBinding, isActiveCurve);
+
+        foreach (var (smrPath, shapeName) in blendshapes)
+        {
+            AnimationCurve bsCurve = new AnimationCurve();
+            bsCurve.AddKey(new Keyframe(0f, isOn ? 100f : 0f));
+            AnimationUtility.SetKeyLeftTangentMode(bsCurve, 0, AnimationUtility.TangentMode.Constant);
+            AnimationUtility.SetKeyRightTangentMode(bsCurve, 0, AnimationUtility.TangentMode.Constant);
+
+            EditorCurveBinding bsBinding = EditorCurveBinding.FloatCurve(smrPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
+            AnimationUtility.SetEditorCurve(clip, bsBinding, bsCurve);
+        }
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        return clip;
+    }
+
+    public static void ExecuteCreateSingleDBTToggles(
+        GameObject[] objects,
+        string[] displayNames,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        string dbtParameter,
+        Dictionary<string, List<(string smrPath, string shapeName)>> selectedBlendshapes)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create Single DBT Toggles");
+
+        // Group objects by parent name, preserving insertion order
+        var groups = new List<(string emptyName, List<(GameObject obj, string name)> items)>();
+        var groupIndex = new Dictionary<string, int>();
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+            if (!groupIndex.TryGetValue(parentName, out int idx))
+            {
+                idx = groups.Count;
+                groupIndex[parentName] = idx;
+                groups.Add((parentName, new List<(GameObject, string)>()));
+            }
+            groups[idx].items.Add((objects[i], displayNames[i]));
+        }
+
+        foreach (var (emptyName, items) in groups)
+        {
+            BlendTree groupTree = new BlendTree();
+            groupTree.name = emptyName;
+            groupTree.blendType = BlendTreeType.Direct;
+            groupTree.hideFlags = HideFlags.HideInHierarchy;
+            AssetDatabase.AddObjectToAsset(groupTree, controller);
+            Undo.RegisterCreatedObjectUndo(groupTree, "Create Single DBT Toggles");
+
+            targetDBT.AddChild(groupTree);
+            var targetChildren = targetDBT.children;
+            targetChildren[targetChildren.Length - 1].directBlendParameter = dbtParameter;
+            targetDBT.children = targetChildren;
+
+            foreach (var (obj, displayName) in items)
+            {
+                string paramName = $"{emptyName}/{displayName}";
+                string animBase = $"Toggles.{emptyName}.{displayName}";
+
+                EnsureAnimatorParameter(controller, paramName);
+
+                string bsKey = obj.GetInstanceID().ToString();
+                selectedBlendshapes.TryGetValue(bsKey, out var bsList);
+                bsList = bsList ?? new List<(string, string)>();
+
+                AnimationClip offClip = CreateDBTToggleAnimation(obj, animBase + ".Off", false, bsList);
+                AnimationClip onClip  = CreateDBTToggleAnimation(obj, animBase + ".On",  true,  bsList);
+
+                BlendTree oneDTree = new BlendTree();
+                oneDTree.name = displayName;
+                oneDTree.blendType = BlendTreeType.Simple1D;
+                oneDTree.blendParameter = paramName;
+                oneDTree.hideFlags = HideFlags.HideInHierarchy;
+                AssetDatabase.AddObjectToAsset(oneDTree, controller);
+                Undo.RegisterCreatedObjectUndo(oneDTree, "Create Single DBT Toggles");
+
+                oneDTree.AddChild(offClip, 0f);
+                oneDTree.AddChild(onClip, 1f);
+
+                groupTree.AddChild(oneDTree);
+                var groupChildren = groupTree.children;
+                groupChildren[groupChildren.Length - 1].directBlendParameter = dbtParameter;
+                groupTree.children = groupChildren;
+            }
+        }
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog("Success", "DBT Toggles created successfully!", "OK");
+    }
+
+    // ─── Shared ───────────────────────────────────────────────────────────────
+
     private static string GetGameObjectPath(GameObject obj)
     {
-        // Find the nearest Animator component in parent hierarchy
         Transform current = obj.transform;
         Transform animatorTransform = null;
 
-        // Search up the hierarchy for an Animator
         while (current != null)
         {
             if (current.GetComponent<Animator>() != null)
@@ -258,14 +451,12 @@ public class AnimationGeneratorTool
             current = current.parent;
         }
 
-        // If no animator found, return just the object name
         if (animatorTransform == null)
         {
             Debug.LogWarning($"No Animator found in hierarchy for {obj.name}. Using object name only.");
             return obj.name;
         }
 
-        // Build the path from the animator to the target object
         string path = "";
         current = obj.transform;
 
@@ -330,7 +521,6 @@ public class AnimationNameWindow : EditorWindow
         }
         EditorGUILayout.EndHorizontal();
 
-        // Allow Enter key to confirm
         if (Event.current.keyCode == KeyCode.Return && Event.current.type == EventType.KeyDown)
         {
             if (!string.IsNullOrEmpty(animationName))
@@ -357,7 +547,6 @@ public class IntAnimationWindow : EditorWindow
         window.includeOffAnimation = includeOff;
         window.animationNames = new string[selectedObjects.Length];
 
-        // Initialize with object names
         for (int i = 0; i < selectedObjects.Length; i++)
         {
             window.animationNames[i] = selectedObjects[i].name;
@@ -373,7 +562,6 @@ public class IntAnimationWindow : EditorWindow
         EditorGUILayout.LabelField("Int Animation Generator", EditorStyles.boldLabel);
         EditorGUILayout.Space();
 
-        // Prefix field
         EditorGUILayout.LabelField("Animation Prefix", EditorStyles.boldLabel);
         GUI.SetNextControlName("PrefixField");
         prefix = EditorGUILayout.TextField("Prefix:", prefix);
@@ -382,7 +570,6 @@ public class IntAnimationWindow : EditorWindow
         EditorGUILayout.LabelField($"Animations to Create ({objects.Length}{(includeOffAnimation ? " + Off" : "")})", EditorStyles.boldLabel);
         EditorGUILayout.Space();
 
-        // Scrollable area for object names
         scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, GUILayout.Height(150));
 
         for (int i = 0; i < objects.Length; i++)
@@ -407,7 +594,6 @@ public class IntAnimationWindow : EditorWindow
 
         EditorGUILayout.Space();
 
-        // Preview
         EditorGUILayout.LabelField("Preview:", EditorStyles.boldLabel);
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
         for (int i = 0; i < objects.Length; i++)
@@ -422,13 +608,11 @@ public class IntAnimationWindow : EditorWindow
 
         EditorGUILayout.Space();
 
-        // Buttons
         EditorGUILayout.BeginHorizontal();
         if (GUILayout.Button("Create", GUILayout.Height(30)))
         {
             bool valid = true;
 
-            // Validate all names are filled
             for (int i = 0; i < animationNames.Length; i++)
             {
                 if (string.IsNullOrEmpty(animationNames[i]))
@@ -451,5 +635,252 @@ public class IntAnimationWindow : EditorWindow
             Close();
         }
         EditorGUILayout.EndHorizontal();
+    }
+}
+
+public class CreateSingleDBTTogglesWindow : EditorWindow
+{
+    private GameObject[] objects;
+    private string[] displayNames;
+    private Transform animatorRoot;
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+    private int selectedParamIndex = 0;
+
+    // Per-object blendshape results: key = instanceID string
+    private Dictionary<string, List<(string smrPath, string shapeName, bool enabled)>> blendshapeResults
+        = new Dictionary<string, List<(string, string, bool)>>();
+    private bool blendshapesSearched = false;
+
+    private Vector2 objectsScrollPos;
+    private Vector2 blendshapesScrollPos;
+
+    public static void Show(GameObject[] selectedObjects)
+    {
+        var window = CreateInstance<CreateSingleDBTTogglesWindow>();
+        window.Initialize(selectedObjects);
+        window.titleContent = new GUIContent("Create DBT Toggles");
+        window.minSize = new Vector2(500, 460);
+        window.ShowModal();
+    }
+
+    private void Initialize(GameObject[] selectedObjects)
+    {
+        objects = selectedObjects;
+        displayNames = new string[selectedObjects.Length];
+        for (int i = 0; i < selectedObjects.Length; i++)
+            displayNames[i] = selectedObjects[i].name;
+
+        DetectAnimator();
+    }
+
+    private void DetectAnimator()
+    {
+        if (objects == null || objects.Length == 0) return;
+
+        Transform current = objects[0].transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+        selectedParamIndex = Mathf.Clamp(selectedParamIndex, 0, Mathf.Max(0, floatParamNames.Length - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create Single DBT Toggles", EditorStyles.boldLabel);
+        EditorGUILayout.Space();
+
+        // Controller info
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.Space();
+
+        if (detectedController == null)
+        {
+            if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+                Close();
+            return;
+        }
+
+        // Direct Blend Tree selector
+        if (directBlendTrees.Count == 0)
+        {
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        }
+        else
+        {
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+        }
+
+        // DBT Parameter selector
+        if (floatParamNames.Length == 0)
+        {
+            EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter (e.g. 'OneFloat') to the controller first.", MessageType.Warning);
+        }
+        else
+        {
+            selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
+        }
+
+        EditorGUILayout.Space();
+
+        // Object name list
+        EditorGUILayout.LabelField("Object Names:", EditorStyles.boldLabel);
+        objectsScrollPos = EditorGUILayout.BeginScrollView(objectsScrollPos, GUILayout.Height(130));
+        for (int i = 0; i < objects.Length; i++)
+        {
+            EditorGUILayout.BeginHorizontal();
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+            EditorGUILayout.LabelField(parentName, GUILayout.Width(130));
+            EditorGUILayout.LabelField("|", GUILayout.Width(10));
+            EditorGUILayout.LabelField(objects[i].name, EditorStyles.miniLabel, GUILayout.Width(130));
+            EditorGUILayout.LabelField("->", GUILayout.Width(20));
+            displayNames[i] = EditorGUILayout.TextField(displayNames[i]);
+            EditorGUILayout.EndHorizontal();
+        }
+        EditorGUILayout.EndScrollView();
+
+        EditorGUILayout.Space();
+
+        // Blendshapes section
+        EditorGUILayout.BeginHorizontal();
+        EditorGUILayout.LabelField("Blendshapes (CLIPPING/ prefix):", EditorStyles.boldLabel);
+        if (GUILayout.Button("Search", GUILayout.Width(70)))
+            SearchBlendshapes();
+        EditorGUILayout.EndHorizontal();
+
+        if (blendshapesSearched)
+        {
+            blendshapesScrollPos = EditorGUILayout.BeginScrollView(blendshapesScrollPos, GUILayout.Height(110));
+            bool anyFound = false;
+            for (int i = 0; i < objects.Length; i++)
+            {
+                string key = objects[i].GetInstanceID().ToString();
+                if (!blendshapeResults.TryGetValue(key, out var bsList) || bsList.Count == 0)
+                    continue;
+                anyFound = true;
+                EditorGUILayout.LabelField(displayNames[i], EditorStyles.boldLabel);
+                for (int j = 0; j < bsList.Count; j++)
+                {
+                    var entry = bsList[j];
+                    EditorGUILayout.BeginHorizontal();
+                    GUILayout.Space(12);
+                    bool newEnabled = EditorGUILayout.ToggleLeft($"{entry.shapeName}  ({entry.smrPath})", entry.enabled);
+                    if (newEnabled != entry.enabled)
+                        bsList[j] = (entry.smrPath, entry.shapeName, newEnabled);
+                    EditorGUILayout.EndHorizontal();
+                    blendshapeResults[key] = bsList;
+                }
+            }
+            if (!anyFound)
+                EditorGUILayout.LabelField("No matching blendshapes found.", EditorStyles.miniLabel);
+            EditorGUILayout.EndScrollView();
+        }
+        else
+        {
+            EditorGUILayout.LabelField("Click Search to find CLIPPING/ blendshapes.", EditorStyles.miniLabel);
+        }
+
+        EditorGUILayout.Space();
+
+        // Buttons
+        bool canCreate = directBlendTrees.Count > 0 && floatParamNames.Length > 0;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                var selectedBlendshapes = BuildSelectedBlendshapes();
+                AnimationGeneratorTool.ExecuteCreateSingleDBTToggles(
+                    objects,
+                    displayNames,
+                    detectedController,
+                    directBlendTrees[selectedTreeIndex],
+                    floatParamNames[selectedParamIndex],
+                    selectedBlendshapes);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+    }
+
+    private void SearchBlendshapes()
+    {
+        blendshapeResults.Clear();
+        if (animatorRoot == null) return;
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            string key = objects[i].GetInstanceID().ToString();
+            var raw = AnimationGeneratorTool.FindClippingBlendshapes(displayNames[i], animatorRoot);
+            blendshapeResults[key] = raw.Select(x => (x.smrPath, x.shapeName, true)).ToList();
+        }
+        blendshapesSearched = true;
+        Repaint();
+    }
+
+    private bool ValidateInputs()
+    {
+        for (int i = 0; i < displayNames.Length; i++)
+        {
+            if (string.IsNullOrEmpty(displayNames[i]))
+            {
+                EditorUtility.DisplayDialog("Error", $"Please enter a name for object {i} ({objects[i].name})", "OK");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Dictionary<string, List<(string smrPath, string shapeName)>> BuildSelectedBlendshapes()
+    {
+        var result = new Dictionary<string, List<(string, string)>>();
+        foreach (var kvp in blendshapeResults)
+        {
+            result[kvp.Key] = kvp.Value
+                .Where(x => x.enabled)
+                .Select(x => (x.smrPath, x.shapeName))
+                .ToList();
+        }
+        return result;
     }
 }
