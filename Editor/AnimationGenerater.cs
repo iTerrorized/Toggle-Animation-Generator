@@ -37,27 +37,29 @@ public class AnimationGeneratorTool
         ShowNameDialog((name) => CreateOnOff2FrameAnimation(targetObject, name));
     }
 
+    // Guard fires once even when multiple objects are selected
     [MenuItem("GameObject/Terrorized/Create Int", false, 13)]
     private static void CreateInt(MenuCommand menuCommand)
     {
+        if (menuCommand.context != Selection.activeObject) return;
         GameObject[] selectedObjects = Selection.gameObjects;
         if (selectedObjects == null || selectedObjects.Length == 0) return;
-
         ShowIntAnimationDialog(selectedObjects, false);
     }
 
     [MenuItem("GameObject/Terrorized/Create Int with Off", false, 14)]
     private static void CreateIntWithOff(MenuCommand menuCommand)
     {
+        if (menuCommand.context != Selection.activeObject) return;
         GameObject[] selectedObjects = Selection.gameObjects;
         if (selectedObjects == null || selectedObjects.Length == 0) return;
-
         ShowIntAnimationDialog(selectedObjects, true);
     }
 
     [MenuItem("GameObject/Terrorized/Create Single DBT Toggles", false, 15)]
     private static void CreateSingleDBTToggles(MenuCommand menuCommand)
     {
+        if (menuCommand.context != Selection.activeObject) return;
         GameObject[] selected = Selection.gameObjects;
         if (selected == null || selected.Length == 0) return;
         CreateSingleDBTTogglesWindow.Show(selected);
@@ -239,6 +241,16 @@ public class AnimationGeneratorTool
 
     // ─── DBT Toggle helpers ───────────────────────────────────────────────────
 
+    // Strips "Category | " prefix and returns PascalCase with no spaces.
+    // e.g. "Tops | Crop Top" -> "CropTop", "Acc | Bunny Ears" -> "BunnyEars"
+    public static string CleanDisplayName(string rawName)
+    {
+        int pipeIdx = rawName.IndexOf(" | ");
+        string name = pipeIdx >= 0 ? rawName.Substring(pipeIdx + 3).Trim() : rawName.Trim();
+        var words = name.Split(new char[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+        return string.Join("", words.Select(w => char.ToUpper(w[0]) + w.Substring(1)));
+    }
+
     public static List<(BlendTree tree, string label)> FindDirectBlendTrees(AnimatorController controller)
     {
         var results = new List<(BlendTree, string)>();
@@ -276,10 +288,21 @@ public class AnimationGeneratorTool
         controller.AddParameter(name, AnimatorControllerParameterType.Float);
     }
 
+    public static void EnsureAnimatorTrigger(AnimatorController controller, string name)
+    {
+        foreach (var param in controller.parameters)
+            if (param.name == name) return;
+        controller.AddParameter(name, AnimatorControllerParameterType.Trigger);
+    }
+
+    // Searches for blendshapes named "CLIPPING/{displayName}..." on all SMRs under the animator.
+    // Also tries without spaces so "Crop Top" matches "CLIPPING/CropTop".
     public static List<(string smrPath, string shapeName)> FindClippingBlendshapes(string displayName, Transform animatorRoot)
     {
         var results = new List<(string, string)>();
         string prefix = "CLIPPING/" + displayName;
+        string prefixNoSpaces = "CLIPPING/" + displayName.Replace(" ", "");
+
         var smrs = animatorRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
         foreach (var smr in smrs)
         {
@@ -289,7 +312,9 @@ public class AnimationGeneratorTool
             for (int i = 0; i < mesh.blendShapeCount; i++)
             {
                 string shapeName = mesh.GetBlendShapeName(i);
-                if (shapeName.StartsWith(prefix))
+                bool matches = shapeName.StartsWith(prefix)
+                    || (prefixNoSpaces != prefix && shapeName.StartsWith(prefixNoSpaces));
+                if (matches)
                     results.Add((smrPath, shapeName));
             }
         }
@@ -383,6 +408,9 @@ public class AnimationGeneratorTool
 
         foreach (var (emptyName, items) in groups)
         {
+            // Add a visual separator trigger before this group's params
+            EnsureAnimatorTrigger(controller, $"-----{emptyName}-----");
+
             BlendTree groupTree = new BlendTree();
             groupTree.name = emptyName;
             groupTree.blendType = BlendTreeType.Direct;
@@ -652,7 +680,7 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
     private string[] floatParamNames = new string[0];
     private int selectedParamIndex = 0;
 
-    // Per-object blendshape results: key = instanceID string
+    // Per-object blendshape results keyed by instanceID string
     private Dictionary<string, List<(string smrPath, string shapeName, bool enabled)>> blendshapeResults
         = new Dictionary<string, List<(string, string, bool)>>();
     private bool blendshapesSearched = false;
@@ -665,7 +693,7 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
         var window = CreateInstance<CreateSingleDBTTogglesWindow>();
         window.Initialize(selectedObjects);
         window.titleContent = new GUIContent("Create DBT Toggles");
-        window.minSize = new Vector2(500, 460);
+        window.minSize = new Vector2(520, 560);
         window.ShowModal();
     }
 
@@ -674,7 +702,7 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
         objects = selectedObjects;
         displayNames = new string[selectedObjects.Length];
         for (int i = 0; i < selectedObjects.Length; i++)
-            displayNames[i] = selectedObjects[i].name;
+            displayNames[i] = AnimationGeneratorTool.CleanDisplayName(selectedObjects[i].name);
 
         DetectAnimator();
     }
@@ -718,7 +746,7 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
     private void OnGUI()
     {
         EditorGUILayout.LabelField("Create Single DBT Toggles", EditorStyles.boldLabel);
-        EditorGUILayout.Space();
+        EditorGUILayout.Space(4);
 
         // Controller info
         EditorGUILayout.BeginVertical(EditorStyles.helpBox);
@@ -728,65 +756,58 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
             EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
         EditorGUILayout.EndVertical();
 
-        EditorGUILayout.Space();
-
         if (detectedController == null)
         {
+            EditorGUILayout.Space(4);
             if (GUILayout.Button("Cancel", GUILayout.Height(30)))
                 Close();
             return;
         }
 
+        EditorGUILayout.Space(4);
+
         // Direct Blend Tree selector
         if (directBlendTrees.Count == 0)
-        {
             EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
-        }
         else
-        {
             selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
-        }
 
         // DBT Parameter selector
         if (floatParamNames.Length == 0)
-        {
             EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter (e.g. 'OneFloat') to the controller first.", MessageType.Warning);
-        }
         else
-        {
             selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
-        }
 
-        EditorGUILayout.Space();
+        EditorGUILayout.Space(6);
 
         // Object name list
         EditorGUILayout.LabelField("Object Names:", EditorStyles.boldLabel);
-        objectsScrollPos = EditorGUILayout.BeginScrollView(objectsScrollPos, GUILayout.Height(130));
+        objectsScrollPos = EditorGUILayout.BeginScrollView(objectsScrollPos, GUILayout.Height(Mathf.Min(objects.Length * 22 + 8, 200)));
         for (int i = 0; i < objects.Length; i++)
         {
             EditorGUILayout.BeginHorizontal();
             string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
-            EditorGUILayout.LabelField(parentName, GUILayout.Width(130));
+            EditorGUILayout.LabelField(parentName, GUILayout.Width(90));
             EditorGUILayout.LabelField("|", GUILayout.Width(10));
-            EditorGUILayout.LabelField(objects[i].name, EditorStyles.miniLabel, GUILayout.Width(130));
+            EditorGUILayout.LabelField(objects[i].name, EditorStyles.miniLabel, GUILayout.Width(160));
             EditorGUILayout.LabelField("->", GUILayout.Width(20));
             displayNames[i] = EditorGUILayout.TextField(displayNames[i]);
             EditorGUILayout.EndHorizontal();
         }
         EditorGUILayout.EndScrollView();
 
-        EditorGUILayout.Space();
+        EditorGUILayout.Space(6);
 
         // Blendshapes section
         EditorGUILayout.BeginHorizontal();
         EditorGUILayout.LabelField("Blendshapes (CLIPPING/ prefix):", EditorStyles.boldLabel);
-        if (GUILayout.Button("Search", GUILayout.Width(70)))
+        if (GUILayout.Button("Search", GUILayout.Width(65)))
             SearchBlendshapes();
         EditorGUILayout.EndHorizontal();
 
         if (blendshapesSearched)
         {
-            blendshapesScrollPos = EditorGUILayout.BeginScrollView(blendshapesScrollPos, GUILayout.Height(110));
+            blendshapesScrollPos = EditorGUILayout.BeginScrollView(blendshapesScrollPos, GUILayout.Height(140));
             bool anyFound = false;
             for (int i = 0; i < objects.Length; i++)
             {
@@ -816,9 +837,9 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
             EditorGUILayout.LabelField("Click Search to find CLIPPING/ blendshapes.", EditorStyles.miniLabel);
         }
 
-        EditorGUILayout.Space();
+        GUILayout.FlexibleSpace();
 
-        // Buttons
+        // Buttons pinned to bottom
         bool canCreate = directBlendTrees.Count > 0 && floatParamNames.Length > 0;
         EditorGUILayout.BeginHorizontal();
         GUI.enabled = canCreate;
@@ -841,6 +862,7 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
         if (GUILayout.Button("Cancel", GUILayout.Height(30)))
             Close();
         EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
     }
 
     private void SearchBlendshapes()
