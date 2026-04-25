@@ -1,12 +1,11 @@
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.Animations;
 using System.Collections.Generic;
 using System.Linq;
 
 public class AddBlendshapesToTogglesTool
 {
-    private const string ASSET_FOLDER = "Assets/!Terrorized/GeneratedAssets";
-
     [MenuItem("GameObject/Terrorized/Add Blendshapes to DBT Toggles", false, 16)]
     private static void AddBlendshapesToDBTToggles(MenuCommand menuCommand)
     {
@@ -16,16 +15,79 @@ public class AddBlendshapesToTogglesTool
         AddBlendshapesToTogglesWindow.Show(selected);
     }
 
-    public static AnimationClip FindClip(string parentName, string displayName, bool isOn)
+    // Searches ALL layers, sub-state machines, and nested blend trees for the
+    // 1D tree that was created for this parentName/displayName pair, then returns
+    // its Off (threshold=0) and On (threshold=1) animation clips.
+    public static (AnimationClip offClip, AnimationClip onClip) FindClipsFromController(
+        AnimatorController controller, string parentName, string displayName)
     {
-        string suffix = isOn ? ".On" : ".Off";
-        string path = $"{ASSET_FOLDER}/Toggles.{parentName}.{displayName}{suffix}.anim";
-        return AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+        foreach (var layer in controller.layers)
+        {
+            var result = SearchStateMachine(layer.stateMachine, parentName, displayName);
+            if (result.offClip != null || result.onClip != null) return result;
+        }
+        return (null, null);
+    }
+
+    private static (AnimationClip offClip, AnimationClip onClip) SearchStateMachine(
+        AnimatorStateMachine sm, string parentName, string displayName)
+    {
+        foreach (var stateInfo in sm.states)
+        {
+            if (stateInfo.state.motion is BlendTree bt)
+            {
+                var r = SearchInBlendTree(bt, parentName, displayName);
+                if (r.offClip != null || r.onClip != null) return r;
+            }
+        }
+        foreach (var sub in sm.stateMachines)
+        {
+            var r = SearchStateMachine(sub.stateMachine, parentName, displayName);
+            if (r.offClip != null || r.onClip != null) return r;
+        }
+        return (null, null);
+    }
+
+    private static (AnimationClip offClip, AnimationClip onClip) SearchInBlendTree(
+        BlendTree tree, string parentName, string displayName)
+    {
+        foreach (var child in tree.children)
+        {
+            if (!(child.motion is BlendTree childTree)) continue;
+
+            // Match group Direct tree named after the empty parent
+            if (childTree.blendType == BlendTreeType.Direct && childTree.name == parentName)
+            {
+                foreach (var groupChild in childTree.children)
+                {
+                    if (!(groupChild.motion is BlendTree oneDTree)) continue;
+                    if (oneDTree.blendType != BlendTreeType.Simple1D) continue;
+                    if (oneDTree.name != displayName) continue;
+
+                    AnimationClip offClip = null, onClip = null;
+                    foreach (var m in oneDTree.children)
+                    {
+                        if (m.motion is AnimationClip clip)
+                        {
+                            if (m.threshold < 0.5f) offClip = clip;
+                            else                    onClip  = clip;
+                        }
+                    }
+                    return (offClip, onClip);
+                }
+            }
+
+            // Recurse deeper
+            var result = SearchInBlendTree(childTree, parentName, displayName);
+            if (result.offClip != null || result.onClip != null) return result;
+        }
+        return (null, null);
     }
 
     public static void Execute(
         GameObject[] objects,
         string[] displayNames,
+        AnimatorController controller,
         Dictionary<string, List<(string smrPath, string shapeName)>> selectedBlendshapes)
     {
         int updated = 0;
@@ -40,12 +102,11 @@ public class AddBlendshapesToTogglesTool
             selectedBlendshapes.TryGetValue(bsKey, out var bsList);
             if (bsList == null || bsList.Count == 0) continue;
 
-            AnimationClip offClip = FindClip(parentName, displayName, false);
-            AnimationClip onClip  = FindClip(parentName, displayName, true);
+            var (offClip, onClip) = FindClipsFromController(controller, parentName, displayName);
 
             if (offClip == null || onClip == null)
             {
-                notFound.Add($"{parentName}/{displayName}");
+                notFound.Add(displayName);
                 continue;
             }
 
@@ -62,14 +123,11 @@ public class AddBlendshapesToTogglesTool
 
         AssetDatabase.SaveAssets();
 
+        string msg = $"Added blendshapes to {updated} toggle pair(s).";
         if (notFound.Count > 0)
-            Debug.LogWarning($"[Add Blendshapes] Could not find clips for: {string.Join(", ", notFound)}");
+            msg += $"\n\nNo blend tree entry found for:\n• {string.Join("\n• ", notFound)}\n\nCheck that these objects had DBT toggles created for them.";
 
-        if (updated > 0)
-            EditorUtility.DisplayDialog("Success", $"Added blendshapes to {updated} toggle pair(s).", "OK");
-        else
-            EditorUtility.DisplayDialog("Nothing Updated",
-                "No clips were updated.\nCheck that display names match the original toggle names,\nand that blendshapes are selected.", "OK");
+        EditorUtility.DisplayDialog(updated > 0 ? "Done" : "Nothing Updated", msg, "OK");
     }
 
     private static void AddCurvesToClip(AnimationClip clip, List<(string smrPath, string shapeName)> blendshapes, bool isOn)
@@ -92,6 +150,7 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
     private GameObject[] objects;
     private string[] displayNames;
     private Transform animatorRoot;
+    private AnimatorController detectedController;
 
     private Dictionary<string, List<(string smrPath, string shapeName, bool enabled)>> blendshapeResults
         = new Dictionary<string, List<(string, string, bool)>>();
@@ -119,9 +178,11 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
         Transform current = objects[0].transform;
         while (current != null)
         {
-            if (current.GetComponent<Animator>() != null)
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
             {
                 animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
                 break;
             }
             current = current.parent;
@@ -133,14 +194,28 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
         EditorGUILayout.LabelField("Add Blendshapes to DBT Toggles", EditorStyles.boldLabel);
         EditorGUILayout.Space(4);
 
-        // Object list
-        EditorGUILayout.LabelField("Object Names (must match existing toggle names):", EditorStyles.boldLabel);
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        EditorGUILayout.LabelField("Object Names:", EditorStyles.boldLabel);
         objectsScrollPos = EditorGUILayout.BeginScrollView(objectsScrollPos, GUILayout.Height(Mathf.Min(objects.Length * 22 + 8, 200)));
 
         for (int i = 0; i < objects.Length; i++)
         {
             EditorGUILayout.BeginHorizontal();
-
             string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
             EditorGUILayout.LabelField(parentName, GUILayout.Width(90));
             EditorGUILayout.LabelField("|", GUILayout.Width(10));
@@ -148,14 +223,14 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
             EditorGUILayout.LabelField("->", GUILayout.Width(20));
             displayNames[i] = EditorGUILayout.TextField(displayNames[i]);
 
-            // Live clip found indicator
-            bool offFound = AddBlendshapesToTogglesTool.FindClip(parentName, displayNames[i], false) != null;
-            bool onFound  = AddBlendshapesToTogglesTool.FindClip(parentName, displayNames[i], true)  != null;
-            bool bothFound = offFound && onFound;
+            // Live check: find clips via blend tree traversal
+            var (offClip, onClip) = AddBlendshapesToTogglesTool.FindClipsFromController(
+                detectedController, parentName, displayNames[i]);
+            bool found = offClip != null && onClip != null;
 
             Color prev = GUI.contentColor;
-            GUI.contentColor = bothFound ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.4f, 0.4f);
-            EditorGUILayout.LabelField(bothFound ? "✓" : "✗", GUILayout.Width(18));
+            GUI.contentColor = found ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.4f, 0.4f);
+            EditorGUILayout.LabelField(found ? "✓" : "✗", GUILayout.Width(18));
             GUI.contentColor = prev;
 
             EditorGUILayout.EndHorizontal();
@@ -164,7 +239,6 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
 
         EditorGUILayout.Space(6);
 
-        // Blendshapes section
         EditorGUILayout.BeginHorizontal();
         EditorGUILayout.LabelField("Blendshapes to Add (CLIPPING/ prefix):", EditorStyles.boldLabel);
         if (GUILayout.Button("Search", GUILayout.Width(65)))
@@ -178,8 +252,7 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
             for (int i = 0; i < objects.Length; i++)
             {
                 string key = objects[i].GetInstanceID().ToString();
-                if (!blendshapeResults.TryGetValue(key, out var bsList) || bsList.Count == 0)
-                    continue;
+                if (!blendshapeResults.TryGetValue(key, out var bsList) || bsList.Count == 0) continue;
                 anyFound = true;
                 EditorGUILayout.LabelField(displayNames[i], EditorStyles.boldLabel);
                 for (int j = 0; j < bsList.Count; j++)
@@ -194,8 +267,7 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
                     blendshapeResults[key] = bsList;
                 }
             }
-            if (!anyFound)
-                EditorGUILayout.LabelField("No matching blendshapes found.", EditorStyles.miniLabel);
+            if (!anyFound) EditorGUILayout.LabelField("No matching blendshapes found.", EditorStyles.miniLabel);
             EditorGUILayout.EndScrollView();
         }
         else
@@ -205,18 +277,17 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
 
         GUILayout.FlexibleSpace();
 
-        // Buttons
         EditorGUILayout.BeginHorizontal();
         if (GUILayout.Button("Add Blendshapes", GUILayout.Height(30)))
         {
             if (ValidateInputs())
             {
-                AddBlendshapesToTogglesTool.Execute(objects, displayNames, BuildSelectedBlendshapes());
+                AddBlendshapesToTogglesTool.Execute(
+                    objects, displayNames, detectedController, BuildSelectedBlendshapes());
                 Close();
             }
         }
-        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
-            Close();
+        if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
         EditorGUILayout.EndHorizontal();
         EditorGUILayout.Space(4);
     }
@@ -225,7 +296,6 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
     {
         blendshapeResults.Clear();
         if (animatorRoot == null) return;
-
         for (int i = 0; i < objects.Length; i++)
         {
             string key = objects[i].GetInstanceID().ToString();
@@ -243,14 +313,6 @@ public class AddBlendshapesToTogglesWindow : EditorWindow
             EditorUtility.DisplayDialog("Nothing Selected",
                 "Search for blendshapes first, then check at least one to add.", "OK");
             return false;
-        }
-        for (int i = 0; i < displayNames.Length; i++)
-        {
-            if (string.IsNullOrEmpty(displayNames[i]))
-            {
-                EditorUtility.DisplayDialog("Error", $"Display name for object {i} ({objects[i].name}) is empty.", "OK");
-                return false;
-            }
         }
         return true;
     }
