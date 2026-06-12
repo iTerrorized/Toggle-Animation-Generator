@@ -818,42 +818,34 @@ public class AnimationGeneratorTool
     // ─── DBT Decal Reveal helpers ─────────────────────────────────────────────
 
     // Reads a Poiyomi material's "marked animated" decal properties.
-    // Poiyomi stores the animated flag as a saved float "<Prop>Animated = 1" (2 = animated when
-    // locked) that is NOT a declared shader property, so Material.GetFloat can't see it — we read
-    // m_SavedProperties.m_Floats directly. Returns the base property names (e.g. "_DecalBlendAlpha")
-    // of every animated DECAL property, ordered by (decal index, alpha-before-hue, name).
+    // Poiyomi/Thry stores the "animated" flag as a material string TAG "<Prop>Animated" = "1"
+    // (or "2" = animated when locked) in the material's stringTagMap — NOT as a float property —
+    // so we read it with Material.GetTag. We enumerate the shader's float/range DECAL properties
+    // and keep the ones whose Animated tag is set. Ordered by (decal index, alpha-before-hue, name).
     public static List<string> FindAnimatedDecalProperties(Material mat)
     {
         var results = new List<string>();
-        if (mat == null) return results;
+        if (mat == null || mat.shader == null) return results;
 
-        var so = new SerializedObject(mat);
-        var floats = so.FindProperty("m_SavedProperties.m_Floats");
-        if (floats == null || !floats.isArray) return results;
-
+        var shader = mat.shader;
+        int count = ShaderUtil.GetPropertyCount(shader);
         var seen = new HashSet<string>();
-        for (int i = 0; i < floats.arraySize; i++)
+
+        for (int i = 0; i < count; i++)
         {
-            var element = floats.GetArrayElementAtIndex(i);
-            var valueProp = element.FindPropertyRelative("second");
-            if (valueProp == null) continue;
+            var ptype = ShaderUtil.GetPropertyType(shader, i);
+            // Only float-like props make sense for a 0..1 reveal (alpha, hue shift, etc.)
+            if (ptype != ShaderUtil.ShaderPropertyType.Float && ptype != ShaderUtil.ShaderPropertyType.Range)
+                continue;
 
-            // m_Floats entries are pairs { first: FastPropertyName{ name }, second: float }.
-            // Depending on Unity version `first` is either a string or a struct with a `name` field.
-            var firstProp = element.FindPropertyRelative("first");
-            if (firstProp == null) continue;
-            string name = firstProp.propertyType == SerializedPropertyType.String
-                ? firstProp.stringValue
-                : firstProp.FindPropertyRelative("name")?.stringValue;
+            string propName = ShaderUtil.GetPropertyName(shader, i);
+            if (propName.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-            if (string.IsNullOrEmpty(name) || !name.EndsWith("Animated")) continue;
-            if (valueProp.floatValue < 1f) continue;
+            string tag = mat.GetTag(propName + "Animated", false, "");
+            if (tag != "1" && tag != "2") continue;  // "1" = animated, "2" = animated when locked
 
-            string baseName = name.Substring(0, name.Length - "Animated".Length);
-            if (baseName.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
-
-            if (seen.Add(baseName))
-                results.Add(baseName);
+            if (seen.Add(propName))
+                results.Add(propName);
         }
 
         results.Sort((a, b) =>
