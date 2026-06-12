@@ -65,6 +65,33 @@ public class AnimationGeneratorTool
         CreateSingleDBTTogglesWindow.Show(selected);
     }
 
+    [MenuItem("GameObject/Terrorized/Create DBT Material Swaps", false, 16)]
+    private static void CreateDBTMaterialSwaps(MenuCommand menuCommand)
+    {
+        if (menuCommand.context != Selection.activeObject) return;
+        GameObject[] selected = Selection.gameObjects;
+        if (selected == null || selected.Length == 0) return;
+        CreateDBTMaterialSwapsWindow.Show(selected);
+    }
+
+    [MenuItem("GameObject/Terrorized/Create DBT Group Material Swap", false, 17)]
+    private static void CreateDBTGroupMaterialSwap(MenuCommand menuCommand)
+    {
+        if (menuCommand.context != Selection.activeObject) return;
+        GameObject[] selected = Selection.gameObjects;
+        if (selected == null || selected.Length == 0) return;
+        CreateDBTGroupMaterialSwapWindow.Show(selected);
+    }
+
+    [MenuItem("GameObject/Terrorized/Create DBT Decal Reveal", false, 18)]
+    private static void CreateDBTDecalReveal(MenuCommand menuCommand)
+    {
+        if (menuCommand.context != Selection.activeObject) return;
+        GameObject[] selected = Selection.gameObjects;
+        if (selected == null || selected.Length == 0) return;
+        CreateDBTDecalRevealWindow.Show(selected);
+    }
+
     private static void ShowNameDialog(System.Action<string> onConfirm)
     {
         AnimationNameWindow.Show(onConfirm);
@@ -462,7 +489,597 @@ public class AnimationGeneratorTool
         EditorUtility.DisplayDialog("Success", "DBT Toggles created successfully!", "OK");
     }
 
+    // ─── DBT Material Swap helpers ────────────────────────────────────────────
+
+    public static AnimationClip CreateMaterialSwapAnimation(
+        GameObject obj, string clipName, int materialSlot, Material material)
+    {
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
+        string targetPath = GetGameObjectPath(obj);
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        EditorCurveBinding binding = new EditorCurveBinding
+        {
+            path = targetPath,
+            type = typeof(SkinnedMeshRenderer),
+            propertyName = "m_Materials.Array.data[" + materialSlot + "]"
+        };
+
+        ObjectReferenceKeyframe[] keyframes = new ObjectReferenceKeyframe[]
+        {
+            new ObjectReferenceKeyframe { time = 0f, value = material }
+        };
+        AnimationUtility.SetObjectReferenceCurve(clip, binding, keyframes);
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        return clip;
+    }
+
+    public static void ExecuteCreateDBTMaterialSwaps(
+        GameObject[] objects,
+        string[] assetNames,
+        int[] materialSlots,
+        List<Material>[] extraMaterials,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        string dbtParameter)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create DBT Material Swaps");
+        Undo.RecordObject(targetDBT, "Create DBT Material Swaps");
+
+        // Group object indices by parent name (category), preserving insertion order
+        var groups = new List<(string category, List<int> itemIndices)>();
+        var groupIndex = new Dictionary<string, int>();
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            if (objects[i] == null) continue;
+            if (objects[i].GetComponent<SkinnedMeshRenderer>() == null) continue;
+
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+            if (!groupIndex.TryGetValue(parentName, out int idx))
+            {
+                idx = groups.Count;
+                groupIndex[parentName] = idx;
+                groups.Add((parentName, new List<int>()));
+            }
+            groups[idx].itemIndices.Add(i);
+        }
+
+        int totalAssets = 0;
+        int totalClips = 0;
+
+        foreach (var (category, itemIndices) in groups)
+        {
+            // Visual separator trigger (matches DBT Toggles convention; no-op if it already exists)
+            EnsureAnimatorTrigger(controller, $"-----{category}-----");
+
+            BlendTree groupTree = new BlendTree();
+            groupTree.name = category;
+            groupTree.blendType = BlendTreeType.Direct;
+            groupTree.hideFlags = HideFlags.HideInHierarchy;
+            AssetDatabase.AddObjectToAsset(groupTree, controller);
+            Undo.RegisterCreatedObjectUndo(groupTree, "Create DBT Material Swaps");
+
+            targetDBT.AddChild(groupTree);
+            var targetChildren = targetDBT.children;
+            targetChildren[targetChildren.Length - 1].directBlendParameter = dbtParameter;
+            targetDBT.children = targetChildren;
+
+            foreach (int i in itemIndices)
+            {
+                var smr = objects[i].GetComponent<SkinnedMeshRenderer>();
+                var sharedMats = smr.sharedMaterials;
+                int slot = Mathf.Clamp(materialSlots[i], 0, Mathf.Max(0, sharedMats.Length - 1));
+                Material defaultMat = sharedMats.Length > 0 ? sharedMats[slot] : null;
+                var extras = extraMaterials[i] ?? new List<Material>();
+
+                string assetName = assetNames[i];
+                string paramName = $"Materials/{category}/{assetName}";
+                string animBase = $"Materials.{category}.{assetName}";
+
+                EnsureAnimatorParameter(controller, paramName);
+
+                // Build clips: index 0 = default, 1..N = extras
+                var clips = new List<AnimationClip>();
+                clips.Add(CreateMaterialSwapAnimation(objects[i], animBase + ".0", slot, defaultMat));
+                for (int m = 0; m < extras.Count; m++)
+                {
+                    clips.Add(CreateMaterialSwapAnimation(objects[i], animBase + "." + (m + 1), slot, extras[m]));
+                }
+                totalClips += clips.Count;
+
+                // Simple1D tree driven by the per-asset float parameter
+                BlendTree oneDTree = new BlendTree();
+                oneDTree.name = assetName;
+                oneDTree.blendType = BlendTreeType.Simple1D;
+                oneDTree.blendParameter = paramName;
+                oneDTree.hideFlags = HideFlags.HideInHierarchy;
+                AssetDatabase.AddObjectToAsset(oneDTree, controller);
+                Undo.RegisterCreatedObjectUndo(oneDTree, "Create DBT Material Swaps");
+
+                for (int m = 0; m < clips.Count; m++)
+                    oneDTree.AddChild(clips[m], (float)m);
+
+                groupTree.AddChild(oneDTree);
+                var groupChildren = groupTree.children;
+                groupChildren[groupChildren.Length - 1].directBlendParameter = dbtParameter;
+                groupTree.children = groupChildren;
+
+                totalAssets++;
+            }
+        }
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog(
+            "Success",
+            $"Created {totalAssets} material swap{(totalAssets == 1 ? "" : "s")} ({totalClips} clip{(totalClips == 1 ? "" : "s")}).",
+            "OK");
+    }
+
+    // ─── DBT Group Material Swap helpers ──────────────────────────────────────
+
+    public struct MaterialTarget
+    {
+        public string smrPath;
+        public int slot;
+        public Material material;  // null = clear; for default state usually the slot's existing material
+    }
+
+    // Creates one clip that drives multiple (smrPath, slot) bindings to specific materials.
+    public static AnimationClip CreateGroupMaterialSwapAnimation(string clipName, List<MaterialTarget> targets)
+    {
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        foreach (var t in targets)
+        {
+            EditorCurveBinding binding = new EditorCurveBinding
+            {
+                path = t.smrPath,
+                type = typeof(SkinnedMeshRenderer),
+                propertyName = "m_Materials.Array.data[" + t.slot + "]"
+            };
+            ObjectReferenceKeyframe[] keyframes = new ObjectReferenceKeyframe[]
+            {
+                new ObjectReferenceKeyframe { time = 0f, value = t.material }
+            };
+            AnimationUtility.SetObjectReferenceCurve(clip, binding, keyframes);
+        }
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        return clip;
+    }
+
+    // For a given material reference, returns (smrPath, slotIndex) for every slot in every SMR that uses it.
+    public static List<(string smrPath, int slot)> FindMaterialSlots(GameObject[] objects, Transform animatorRoot, Material material)
+    {
+        var results = new List<(string, int)>();
+        if (material == null) return results;
+
+        foreach (var go in objects)
+        {
+            if (go == null) continue;
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (smr == null) continue;
+
+            string smrPath = GetGameObjectPath(go);
+            var mats = smr.sharedMaterials;
+            for (int s = 0; s < mats.Length; s++)
+            {
+                if (mats[s] == material)
+                    results.Add((smrPath, s));
+            }
+        }
+        return results;
+    }
+
+    // Returns materials that appear at least once in EVERY SMR among `objects`.
+    public static List<Material> FindSharedMaterials(GameObject[] objects)
+    {
+        var validSmrs = objects
+            .Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null)
+            .Select(o => o.GetComponent<SkinnedMeshRenderer>())
+            .ToList();
+
+        if (validSmrs.Count == 0) return new List<Material>();
+
+        // Start with the unique set from the first SMR (preserve order)
+        HashSet<Material> seen = new HashSet<Material>();
+        List<Material> candidates = new List<Material>();
+        foreach (var m in validSmrs[0].sharedMaterials)
+        {
+            if (m != null && seen.Add(m))
+                candidates.Add(m);
+        }
+
+        // Intersect against each subsequent SMR
+        for (int i = 1; i < validSmrs.Count; i++)
+        {
+            var these = new HashSet<Material>(validSmrs[i].sharedMaterials.Where(m => m != null));
+            candidates = candidates.Where(m => these.Contains(m)).ToList();
+            if (candidates.Count == 0) break;
+        }
+
+        return candidates;
+    }
+
+    public static void ExecuteCreateDBTGroupMaterialSwap(
+        GameObject[] objects,
+        string category,
+        string assetName,
+        Material sharedMaterial,
+        List<Material> extraMaterials,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        string dbtParameter)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create DBT Group Material Swap");
+        Undo.RecordObject(targetDBT, "Create DBT Group Material Swap");
+
+        // Resolve every (smr, slot) currently using the shared material
+        var slotMap = FindMaterialSlots(objects, null, sharedMaterial);
+        if (slotMap.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Error", "Selected shared material isn't on any of the selected meshes anymore.", "OK");
+            return;
+        }
+
+        // Visual separator + category group blendtree (matches DBT Toggles convention)
+        EnsureAnimatorTrigger(controller, $"-----{category}-----");
+
+        BlendTree groupTree = new BlendTree();
+        groupTree.name = category;
+        groupTree.blendType = BlendTreeType.Direct;
+        groupTree.hideFlags = HideFlags.HideInHierarchy;
+        AssetDatabase.AddObjectToAsset(groupTree, controller);
+        Undo.RegisterCreatedObjectUndo(groupTree, "Create DBT Group Material Swap");
+
+        targetDBT.AddChild(groupTree);
+        var targetChildren = targetDBT.children;
+        targetChildren[targetChildren.Length - 1].directBlendParameter = dbtParameter;
+        targetDBT.children = targetChildren;
+
+        string paramName = $"Materials/{category}/{assetName}";
+        string animBase = $"Materials.{category}.{assetName}";
+
+        EnsureAnimatorParameter(controller, paramName);
+
+        // Build the default clip (state 0): every found slot pinned back to the shared material
+        var defaultTargets = slotMap.Select(p => new MaterialTarget
+        {
+            smrPath = p.smrPath,
+            slot = p.slot,
+            material = sharedMaterial
+        }).ToList();
+
+        var clips = new List<AnimationClip>();
+        clips.Add(CreateGroupMaterialSwapAnimation(animBase + ".0", defaultTargets));
+
+        // Build a clip per extra material: every found slot drives to that material
+        for (int e = 0; e < extraMaterials.Count; e++)
+        {
+            var mat = extraMaterials[e];
+            var targets = slotMap.Select(p => new MaterialTarget
+            {
+                smrPath = p.smrPath,
+                slot = p.slot,
+                material = mat
+            }).ToList();
+            clips.Add(CreateGroupMaterialSwapAnimation(animBase + "." + (e + 1), targets));
+        }
+
+        // Simple1D tree driven by the new float parameter
+        BlendTree oneDTree = new BlendTree();
+        oneDTree.name = assetName;
+        oneDTree.blendType = BlendTreeType.Simple1D;
+        oneDTree.blendParameter = paramName;
+        oneDTree.hideFlags = HideFlags.HideInHierarchy;
+        AssetDatabase.AddObjectToAsset(oneDTree, controller);
+        Undo.RegisterCreatedObjectUndo(oneDTree, "Create DBT Group Material Swap");
+
+        for (int m = 0; m < clips.Count; m++)
+            oneDTree.AddChild(clips[m], (float)m);
+
+        groupTree.AddChild(oneDTree);
+        var groupChildren = groupTree.children;
+        groupChildren[groupChildren.Length - 1].directBlendParameter = dbtParameter;
+        groupTree.children = groupChildren;
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog(
+            "Success",
+            $"Created group material swap '{category}/{assetName}' ({clips.Count} clips across {slotMap.Count} slot binding{(slotMap.Count == 1 ? "" : "s")}).",
+            "OK");
+    }
+
+    // ─── DBT Decal Reveal helpers ─────────────────────────────────────────────
+
+    // Reads a Poiyomi material's "marked animated" decal properties.
+    // Poiyomi stores the animated flag as a saved float "<Prop>Animated = 1" (2 = animated when
+    // locked) that is NOT a declared shader property, so Material.GetFloat can't see it — we read
+    // m_SavedProperties.m_Floats directly. Returns the base property names (e.g. "_DecalBlendAlpha")
+    // of every animated DECAL property, ordered by (decal index, alpha-before-hue, name).
+    public static List<string> FindAnimatedDecalProperties(Material mat)
+    {
+        var results = new List<string>();
+        if (mat == null) return results;
+
+        var so = new SerializedObject(mat);
+        var floats = so.FindProperty("m_SavedProperties.m_Floats");
+        if (floats == null || !floats.isArray) return results;
+
+        var seen = new HashSet<string>();
+        for (int i = 0; i < floats.arraySize; i++)
+        {
+            var element = floats.GetArrayElementAtIndex(i);
+            var valueProp = element.FindPropertyRelative("second");
+            if (valueProp == null) continue;
+
+            // m_Floats entries are pairs { first: FastPropertyName{ name }, second: float }.
+            // Depending on Unity version `first` is either a string or a struct with a `name` field.
+            var firstProp = element.FindPropertyRelative("first");
+            if (firstProp == null) continue;
+            string name = firstProp.propertyType == SerializedPropertyType.String
+                ? firstProp.stringValue
+                : firstProp.FindPropertyRelative("name")?.stringValue;
+
+            if (string.IsNullOrEmpty(name) || !name.EndsWith("Animated")) continue;
+            if (valueProp.floatValue < 1f) continue;
+
+            string baseName = name.Substring(0, name.Length - "Animated".Length);
+            if (baseName.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+            if (seen.Add(baseName))
+                results.Add(baseName);
+        }
+
+        results.Sort((a, b) =>
+        {
+            int ia = DecalIndexOf(a), ib = DecalIndexOf(b);
+            if (ia != ib) return ia.CompareTo(ib);
+            int ta = DecalTypeRank(a), tb = DecalTypeRank(b);
+            if (ta != tb) return ta.CompareTo(tb);
+            return string.Compare(a, b, System.StringComparison.Ordinal);
+        });
+
+        return results;
+    }
+
+    // Trailing digits of a property name → decal index (no digits ⇒ 0). "_DecalHueShift1" → 1.
+    private static int DecalIndexOf(string propName)
+    {
+        int end = propName.Length;
+        int start = end;
+        while (start > 0 && char.IsDigit(propName[start - 1])) start--;
+        if (start == end) return 0;
+        return int.TryParse(propName.Substring(start, end - start), out int idx) ? idx : 0;
+    }
+
+    // alpha (0) before hue (1) before anything else (2).
+    private static int DecalTypeRank(string propName)
+    {
+        if (propName.IndexOf("Alpha", System.StringComparison.OrdinalIgnoreCase) >= 0) return 0;
+        if (propName.IndexOf("Hue", System.StringComparison.OrdinalIgnoreCase) >= 0) return 1;
+        return 2;
+    }
+
+    // One reveal clip: the first `onCount` properties are driven to 1, the rest to 0 (constant).
+    public static AnimationClip CreateDecalRevealAnimation(
+        GameObject obj, string clipName, List<string> props, int onCount)
+    {
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
+        string targetPath = GetGameObjectPath(obj);
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        for (int j = 0; j < props.Count; j++)
+        {
+            float value = j < onCount ? 1f : 0f;
+
+            AnimationCurve curve = new AnimationCurve();
+            curve.AddKey(new Keyframe(0f, value));
+            AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+            AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+
+            EditorCurveBinding binding = EditorCurveBinding.FloatCurve(
+                targetPath, typeof(Renderer), "material." + props[j]);
+            AnimationUtility.SetEditorCurve(clip, binding, curve);
+        }
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        return clip;
+    }
+
+    // Collects the animated decal properties across every material on the SMR (deduped, ordered).
+    public static List<string> GetMeshAnimatedDecalProperties(GameObject obj)
+    {
+        var combined = new List<string>();
+        var seen = new HashSet<string>();
+        if (obj == null) return combined;
+
+        var smr = obj.GetComponent<SkinnedMeshRenderer>();
+        if (smr == null) return combined;
+
+        foreach (var mat in smr.sharedMaterials)
+        {
+            foreach (var prop in FindAnimatedDecalProperties(mat))
+                if (seen.Add(prop))
+                    combined.Add(prop);
+        }
+        return combined;
+    }
+
+    public static void ExecuteCreateDBTDecalReveal(
+        GameObject[] objects,
+        string[] assetNames,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        string dbtParameter)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create DBT Decal Reveal");
+        Undo.RecordObject(targetDBT, "Create DBT Decal Reveal");
+
+        // Group object indices by parent name (category), preserving insertion order
+        var groups = new List<(string category, List<int> itemIndices)>();
+        var groupIndex = new Dictionary<string, int>();
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            if (objects[i] == null) continue;
+            if (objects[i].GetComponent<SkinnedMeshRenderer>() == null) continue;
+            if (GetMeshAnimatedDecalProperties(objects[i]).Count == 0) continue;
+
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+            if (!groupIndex.TryGetValue(parentName, out int idx))
+            {
+                idx = groups.Count;
+                groupIndex[parentName] = idx;
+                groups.Add((parentName, new List<int>()));
+            }
+            groups[idx].itemIndices.Add(i);
+        }
+
+        int totalAssets = 0;
+        int totalClips = 0;
+
+        foreach (var (category, itemIndices) in groups)
+        {
+            // Visual separator trigger (matches the other DBT features; no-op if it already exists)
+            EnsureAnimatorTrigger(controller, $"-----{category}-----");
+
+            BlendTree groupTree = new BlendTree();
+            groupTree.name = category;
+            groupTree.blendType = BlendTreeType.Direct;
+            groupTree.hideFlags = HideFlags.HideInHierarchy;
+            AssetDatabase.AddObjectToAsset(groupTree, controller);
+            Undo.RegisterCreatedObjectUndo(groupTree, "Create DBT Decal Reveal");
+
+            targetDBT.AddChild(groupTree);
+            var targetChildren = targetDBT.children;
+            targetChildren[targetChildren.Length - 1].directBlendParameter = dbtParameter;
+            targetDBT.children = targetChildren;
+
+            foreach (int i in itemIndices)
+            {
+                var props = GetMeshAnimatedDecalProperties(objects[i]);
+
+                string assetName = assetNames[i];
+                string paramName = $"Decals/{category}/{assetName}";
+                string animBase = $"Decals.{category}.{assetName}";
+
+                EnsureAnimatorParameter(controller, paramName);
+
+                // Cumulative reveal: clip k turns on the first k properties (k = 0..N)
+                var clips = new List<AnimationClip>();
+                for (int k = 0; k <= props.Count; k++)
+                    clips.Add(CreateDecalRevealAnimation(objects[i], animBase + "." + k, props, k));
+                totalClips += clips.Count;
+
+                // Simple1D tree driven by the per-asset float parameter, thresholds 0..N
+                BlendTree oneDTree = new BlendTree();
+                oneDTree.name = assetName;
+                oneDTree.blendType = BlendTreeType.Simple1D;
+                oneDTree.blendParameter = paramName;
+                oneDTree.hideFlags = HideFlags.HideInHierarchy;
+                AssetDatabase.AddObjectToAsset(oneDTree, controller);
+                Undo.RegisterCreatedObjectUndo(oneDTree, "Create DBT Decal Reveal");
+
+                for (int m = 0; m < clips.Count; m++)
+                    oneDTree.AddChild(clips[m], (float)m);
+
+                groupTree.AddChild(oneDTree);
+                var groupChildren = groupTree.children;
+                groupChildren[groupChildren.Length - 1].directBlendParameter = dbtParameter;
+                groupTree.children = groupChildren;
+
+                totalAssets++;
+            }
+        }
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        if (totalAssets == 0)
+        {
+            EditorUtility.DisplayDialog(
+                "Nothing Created",
+                "None of the selected meshes have any decal properties marked as animated.",
+                "OK");
+            return;
+        }
+
+        EditorUtility.DisplayDialog(
+            "Success",
+            $"Created {totalAssets} decal reveal{(totalAssets == 1 ? "" : "s")} ({totalClips} clip{(totalClips == 1 ? "" : "s")}).",
+            "OK");
+    }
+
     // ─── Shared ───────────────────────────────────────────────────────────────
+
+    // Accepts material drops into the given rect; returns true if anything was added.
+    // Call this AFTER drawing a section, using GUILayoutUtility.GetLastRect() for the area.
+    public static bool HandleMaterialDragAndDrop(Rect dropArea, List<Material> target)
+    {
+        Event evt = Event.current;
+        if (evt == null) return false;
+        if (!dropArea.Contains(evt.mousePosition)) return false;
+
+        if (evt.type != EventType.DragUpdated && evt.type != EventType.DragPerform)
+            return false;
+
+        bool hasMaterial = false;
+        foreach (var obj in DragAndDrop.objectReferences)
+        {
+            if (obj is Material) { hasMaterial = true; break; }
+        }
+        if (!hasMaterial) return false;
+
+        DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+
+        if (evt.type == EventType.DragPerform)
+        {
+            DragAndDrop.AcceptDrag();
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj is Material mat)
+                    target.Add(mat);
+            }
+            evt.Use();
+            return true;
+        }
+        return false;
+    }
 
     private static string GetGameObjectPath(GameObject obj)
     {
@@ -904,5 +1521,827 @@ public class CreateSingleDBTTogglesWindow : EditorWindow
                 .ToList();
         }
         return result;
+    }
+}
+
+public class CreateDBTMaterialSwapsWindow : EditorWindow
+{
+    private GameObject[] objects;
+    private string[] assetNames;
+    private int[] materialSlotIndices;
+    private List<Material>[] extraMaterials;
+    private bool[] foldoutStates;
+
+    private Transform animatorRoot;
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+    private int selectedParamIndex = 0;
+
+    private Vector2 mainScrollPos;
+
+    public static void Show(GameObject[] selectedObjects)
+    {
+        var window = CreateInstance<CreateDBTMaterialSwapsWindow>();
+        window.Initialize(selectedObjects);
+        window.titleContent = new GUIContent("Create DBT Material Swaps");
+        window.minSize = new Vector2(560, 600);
+        window.ShowUtility();
+    }
+
+    private void Initialize(GameObject[] selectedObjects)
+    {
+        // Keep only objects that actually have a SkinnedMeshRenderer
+        var valid = selectedObjects.Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null).ToArray();
+        objects = valid;
+        assetNames = new string[valid.Length];
+        materialSlotIndices = new int[valid.Length];
+        extraMaterials = new List<Material>[valid.Length];
+        foldoutStates = new bool[valid.Length];
+
+        for (int i = 0; i < valid.Length; i++)
+        {
+            assetNames[i] = AnimationGeneratorTool.CleanDisplayName(valid[i].name);
+            materialSlotIndices[i] = 0;
+            extraMaterials[i] = new List<Material>();
+            foldoutStates[i] = true;
+        }
+
+        DetectAnimator(selectedObjects);
+    }
+
+    private void DetectAnimator(GameObject[] sourceObjects)
+    {
+        if (sourceObjects == null || sourceObjects.Length == 0) return;
+
+        Transform current = sourceObjects[0].transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+        selectedParamIndex = Mathf.Clamp(selectedParamIndex, 0, Mathf.Max(0, floatParamNames.Length - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create DBT Material Swaps", EditorStyles.boldLabel);
+        EditorGUILayout.Space(4);
+
+        // Controller info
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+                Close();
+            return;
+        }
+
+        if (objects == null || objects.Length == 0)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox("None of the selected objects have a SkinnedMeshRenderer.", MessageType.Error);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+                Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        // Tree + parameter selectors
+        if (directBlendTrees.Count == 0)
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        else
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+
+        if (floatParamNames.Length == 0)
+            EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter to the controller first.", MessageType.Warning);
+        else
+            selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
+
+        EditorGUILayout.Space(6);
+        EditorGUILayout.LabelField("Material Swaps:", EditorStyles.boldLabel);
+
+        mainScrollPos = EditorGUILayout.BeginScrollView(mainScrollPos);
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            var smr = objects[i].GetComponent<SkinnedMeshRenderer>();
+            var mats = smr.sharedMaterials;
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            foldoutStates[i] = EditorGUILayout.Foldout(
+                foldoutStates[i],
+                $"{parentName} | {objects[i].name}",
+                true,
+                EditorStyles.foldoutHeader);
+
+            if (foldoutStates[i])
+            {
+                EditorGUI.indentLevel++;
+
+                // Asset name
+                assetNames[i] = EditorGUILayout.TextField("Asset Name:", assetNames[i]);
+
+                // Material slot dropdown
+                if (mats.Length == 0)
+                {
+                    EditorGUILayout.HelpBox("This SkinnedMeshRenderer has no materials.", MessageType.Warning);
+                }
+                else
+                {
+                    string[] slotOptions = new string[mats.Length];
+                    for (int s = 0; s < mats.Length; s++)
+                    {
+                        string matName = mats[s] != null ? mats[s].name : "(None)";
+                        slotOptions[s] = $"[{s}] {matName}";
+                    }
+                    materialSlotIndices[i] = Mathf.Clamp(materialSlotIndices[i], 0, mats.Length - 1);
+                    materialSlotIndices[i] = EditorGUILayout.Popup("Material Slot (default):", materialSlotIndices[i], slotOptions);
+                }
+
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField("Extra Materials (Swap Targets):", EditorStyles.miniBoldLabel);
+
+                var extras = extraMaterials[i];
+                for (int e = 0; e < extras.Count; e++)
+                {
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField($"[{e + 1}]", GUILayout.Width(34));
+                    extras[e] = (Material)EditorGUILayout.ObjectField(extras[e], typeof(Material), false);
+                    if (GUILayout.Button("X", GUILayout.Width(25)))
+                    {
+                        extras.RemoveAt(e);
+                        e--;
+                    }
+                    EditorGUILayout.EndHorizontal();
+                }
+
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("+ Add Material", GUILayout.Width(130)))
+                    extras.Add(null);
+                EditorGUILayout.EndHorizontal();
+
+                // Preview
+                if (mats.Length > 0 && !string.IsNullOrEmpty(assetNames[i]))
+                {
+                    EditorGUILayout.Space(2);
+                    EditorGUILayout.LabelField("Preview:", EditorStyles.miniBoldLabel);
+                    EditorGUILayout.LabelField($"  Param: Materials/{parentName}/{assetNames[i]}", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField($"  Materials.{parentName}.{assetNames[i]}.0  (default)", EditorStyles.miniLabel);
+                    for (int e = 0; e < extras.Count; e++)
+                        EditorGUILayout.LabelField($"  Materials.{parentName}.{assetNames[i]}.{e + 1}", EditorStyles.miniLabel);
+                }
+
+                EditorGUI.indentLevel--;
+            }
+            EditorGUILayout.EndVertical();
+
+            // Drag-and-drop: any Material(s) dropped on this asset's box are appended to its extras list
+            Rect boxRect = GUILayoutUtility.GetLastRect();
+            if (AnimationGeneratorTool.HandleMaterialDragAndDrop(boxRect, extraMaterials[i]))
+                Repaint();
+
+            EditorGUILayout.Space(2);
+        }
+
+        EditorGUILayout.EndScrollView();
+
+        GUILayout.FlexibleSpace();
+
+        // Bottom buttons
+        bool canCreate = directBlendTrees.Count > 0 && floatParamNames.Length > 0;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                AnimationGeneratorTool.ExecuteCreateDBTMaterialSwaps(
+                    objects,
+                    assetNames,
+                    materialSlotIndices,
+                    extraMaterials,
+                    detectedController,
+                    directBlendTrees[selectedTreeIndex],
+                    floatParamNames[selectedParamIndex]);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
+    }
+
+    private bool ValidateInputs()
+    {
+        bool anyExtras = false;
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            if (string.IsNullOrEmpty(assetNames[i]))
+            {
+                EditorUtility.DisplayDialog("Error", $"Please enter an asset name for {objects[i].name}.", "OK");
+                return false;
+            }
+
+            var smr = objects[i].GetComponent<SkinnedMeshRenderer>();
+            if (smr.sharedMaterials.Length == 0)
+            {
+                EditorUtility.DisplayDialog("Error", $"{objects[i].name} has no materials on its SkinnedMeshRenderer.", "OK");
+                return false;
+            }
+
+            for (int e = 0; e < extraMaterials[i].Count; e++)
+            {
+                if (extraMaterials[i][e] == null)
+                {
+                    EditorUtility.DisplayDialog(
+                        "Error",
+                        $"{objects[i].name}: extra material slot [{e + 1}] is empty. Assign or remove it.",
+                        "OK");
+                    return false;
+                }
+            }
+
+            if (extraMaterials[i].Count > 0) anyExtras = true;
+        }
+
+        if (!anyExtras)
+        {
+            return EditorUtility.DisplayDialog(
+                "No Extra Materials",
+                "No extra materials were added to any asset. Only default (.0) clips will be created. Continue?",
+                "Continue",
+                "Cancel");
+        }
+
+        return true;
+    }
+}
+
+public class CreateDBTGroupMaterialSwapWindow : EditorWindow
+{
+    private GameObject[] objects;
+    private string categoryName = "";
+    private string assetName = "";
+
+    private List<Material> sharedMaterials = new List<Material>();
+    private int selectedSharedIndex = 0;
+
+    private List<Material> extraMaterials = new List<Material>();
+
+    private Transform animatorRoot;
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+    private int selectedParamIndex = 0;
+
+    private Vector2 mainScrollPos;
+
+    public static void Show(GameObject[] selectedObjects)
+    {
+        var window = CreateInstance<CreateDBTGroupMaterialSwapWindow>();
+        window.Initialize(selectedObjects);
+        window.titleContent = new GUIContent("Create DBT Group Material Swap");
+        window.minSize = new Vector2(560, 600);
+        window.ShowUtility();
+    }
+
+    private void Initialize(GameObject[] selectedObjects)
+    {
+        var valid = selectedObjects.Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null).ToArray();
+        objects = valid;
+
+        // Default category = common parent name if all share one; otherwise blank
+        if (valid.Length > 0)
+        {
+            string firstParent = valid[0].transform.parent != null ? valid[0].transform.parent.name : "";
+            bool allSame = true;
+            for (int i = 1; i < valid.Length; i++)
+            {
+                string p = valid[i].transform.parent != null ? valid[i].transform.parent.name : "";
+                if (p != firstParent) { allSame = false; break; }
+            }
+            if (allSame && !string.IsNullOrEmpty(firstParent))
+                categoryName = firstParent;
+        }
+
+        sharedMaterials = AnimationGeneratorTool.FindSharedMaterials(valid);
+
+        DetectAnimator(selectedObjects);
+    }
+
+    private void DetectAnimator(GameObject[] sourceObjects)
+    {
+        if (sourceObjects == null || sourceObjects.Length == 0) return;
+
+        Transform current = sourceObjects[0].transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+        selectedParamIndex = Mathf.Clamp(selectedParamIndex, 0, Mathf.Max(0, floatParamNames.Length - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create DBT Group Material Swap", EditorStyles.boldLabel);
+        EditorGUILayout.Space(4);
+
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        if (objects == null || objects.Length == 0)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox("None of the selected objects have a SkinnedMeshRenderer.", MessageType.Error);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        if (directBlendTrees.Count == 0)
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        else
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+
+        if (floatParamNames.Length == 0)
+            EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter to the controller first.", MessageType.Warning);
+        else
+            selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
+
+        EditorGUILayout.Space(6);
+
+        // Naming
+        EditorGUILayout.LabelField("Naming:", EditorStyles.boldLabel);
+        categoryName = EditorGUILayout.TextField("Category:", categoryName);
+        assetName    = EditorGUILayout.TextField("Name:",     assetName);
+
+        EditorGUILayout.Space(6);
+
+        // Selected objects summary
+        EditorGUILayout.LabelField($"Targets ({objects.Length}):", EditorStyles.boldLabel);
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        foreach (var go in objects)
+        {
+            string parent = go.transform.parent != null ? go.transform.parent.name : "Root";
+            EditorGUILayout.LabelField($"{parent} | {go.name}", EditorStyles.miniLabel);
+        }
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.Space(6);
+
+        // Shared material selector
+        EditorGUILayout.LabelField("Shared Material:", EditorStyles.boldLabel);
+        if (sharedMaterials.Count == 0)
+        {
+            EditorGUILayout.HelpBox("No materials are shared across all selected meshes.", MessageType.Warning);
+        }
+        else
+        {
+            string[] options = sharedMaterials
+                .Select(m => m != null ? m.name : "(None)")
+                .ToArray();
+            selectedSharedIndex = Mathf.Clamp(selectedSharedIndex, 0, sharedMaterials.Count - 1);
+            selectedSharedIndex = EditorGUILayout.Popup("Material:", selectedSharedIndex, options);
+
+            // Show which slot the chosen material occupies on each mesh
+            Material chosen = sharedMaterials[selectedSharedIndex];
+            EditorGUILayout.LabelField("Will affect:", EditorStyles.miniBoldLabel);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            foreach (var go in objects)
+            {
+                var smr = go.GetComponent<SkinnedMeshRenderer>();
+                var mats = smr.sharedMaterials;
+                var slots = new List<int>();
+                for (int s = 0; s < mats.Length; s++)
+                    if (mats[s] == chosen) slots.Add(s);
+
+                string slotText = slots.Count == 0
+                    ? "no slot (?)"
+                    : "slot " + string.Join(", ", slots.Select(s => s.ToString()));
+                EditorGUILayout.LabelField($"  {go.name}: {slotText}", EditorStyles.miniLabel);
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        EditorGUILayout.Space(6);
+
+        // Extras list (drag-and-drop + buttons)
+        EditorGUILayout.LabelField("Extra Materials (Swap Targets):", EditorStyles.boldLabel);
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+        mainScrollPos = EditorGUILayout.BeginScrollView(mainScrollPos, GUILayout.MinHeight(80));
+        for (int e = 0; e < extraMaterials.Count; e++)
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"[{e + 1}]", GUILayout.Width(34));
+            extraMaterials[e] = (Material)EditorGUILayout.ObjectField(extraMaterials[e], typeof(Material), false);
+            if (GUILayout.Button("X", GUILayout.Width(25)))
+            {
+                extraMaterials.RemoveAt(e);
+                e--;
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+        if (extraMaterials.Count == 0)
+        {
+            EditorGUILayout.LabelField("Drop materials here, or use + Add Material below.", EditorStyles.miniLabel);
+        }
+        EditorGUILayout.EndScrollView();
+
+        EditorGUILayout.BeginHorizontal();
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("+ Add Material", GUILayout.Width(130)))
+            extraMaterials.Add(null);
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.EndVertical();
+
+        // Drag-and-drop onto the extras box
+        Rect extrasRect = GUILayoutUtility.GetLastRect();
+        if (AnimationGeneratorTool.HandleMaterialDragAndDrop(extrasRect, extraMaterials))
+            Repaint();
+
+        EditorGUILayout.Space(6);
+
+        // Preview
+        if (!string.IsNullOrEmpty(categoryName) && !string.IsNullOrEmpty(assetName))
+        {
+            EditorGUILayout.LabelField("Preview:", EditorStyles.boldLabel);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField($"Param: Materials/{categoryName}/{assetName}", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"Materials.{categoryName}.{assetName}.0  (default)", EditorStyles.miniLabel);
+            for (int e = 0; e < extraMaterials.Count; e++)
+                EditorGUILayout.LabelField($"Materials.{categoryName}.{assetName}.{e + 1}", EditorStyles.miniLabel);
+            EditorGUILayout.EndVertical();
+        }
+
+        GUILayout.FlexibleSpace();
+
+        // Buttons
+        bool canCreate = directBlendTrees.Count > 0
+                         && floatParamNames.Length > 0
+                         && sharedMaterials.Count > 0;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                AnimationGeneratorTool.ExecuteCreateDBTGroupMaterialSwap(
+                    objects,
+                    categoryName,
+                    assetName,
+                    sharedMaterials[selectedSharedIndex],
+                    extraMaterials,
+                    detectedController,
+                    directBlendTrees[selectedTreeIndex],
+                    floatParamNames[selectedParamIndex]);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
+    }
+
+    private bool ValidateInputs()
+    {
+        if (string.IsNullOrEmpty(categoryName))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter a category name.", "OK");
+            return false;
+        }
+        if (string.IsNullOrEmpty(assetName))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter an asset name.", "OK");
+            return false;
+        }
+
+        for (int e = 0; e < extraMaterials.Count; e++)
+        {
+            if (extraMaterials[e] == null)
+            {
+                EditorUtility.DisplayDialog(
+                    "Error",
+                    $"Extra material slot [{e + 1}] is empty. Assign or remove it.",
+                    "OK");
+                return false;
+            }
+        }
+
+        if (extraMaterials.Count == 0)
+        {
+            return EditorUtility.DisplayDialog(
+                "No Extra Materials",
+                "No extra materials added. Only the default (.0) clip will be created. Continue?",
+                "Continue",
+                "Cancel");
+        }
+        return true;
+    }
+}
+
+public class CreateDBTDecalRevealWindow : EditorWindow
+{
+    private GameObject[] objects;
+    private string[] assetNames;
+    private List<string>[] decalProps;   // detected animated decal props per object (reveal order)
+    private bool[] foldoutStates;
+
+    private Transform animatorRoot;
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+    private int selectedParamIndex = 0;
+
+    private Vector2 mainScrollPos;
+
+    public static void Show(GameObject[] selectedObjects)
+    {
+        var window = CreateInstance<CreateDBTDecalRevealWindow>();
+        window.Initialize(selectedObjects);
+        window.titleContent = new GUIContent("Create DBT Decal Reveal");
+        window.minSize = new Vector2(560, 600);
+        window.ShowUtility();
+    }
+
+    private void Initialize(GameObject[] selectedObjects)
+    {
+        // Keep only objects that actually have a SkinnedMeshRenderer
+        var valid = selectedObjects.Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null).ToArray();
+        objects = valid;
+        assetNames = new string[valid.Length];
+        decalProps = new List<string>[valid.Length];
+        foldoutStates = new bool[valid.Length];
+
+        for (int i = 0; i < valid.Length; i++)
+        {
+            assetNames[i] = AnimationGeneratorTool.CleanDisplayName(valid[i].name);
+            decalProps[i] = AnimationGeneratorTool.GetMeshAnimatedDecalProperties(valid[i]);
+            foldoutStates[i] = true;
+        }
+
+        DetectAnimator(selectedObjects);
+    }
+
+    private void DetectAnimator(GameObject[] sourceObjects)
+    {
+        if (sourceObjects == null || sourceObjects.Length == 0) return;
+
+        Transform current = sourceObjects[0].transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+        selectedParamIndex = Mathf.Clamp(selectedParamIndex, 0, Mathf.Max(0, floatParamNames.Length - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create DBT Decal Reveal", EditorStyles.boldLabel);
+        EditorGUILayout.Space(4);
+
+        // Controller info
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+                Close();
+            return;
+        }
+
+        if (objects == null || objects.Length == 0)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox("None of the selected objects have a SkinnedMeshRenderer.", MessageType.Error);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+                Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        // Tree + parameter selectors
+        if (directBlendTrees.Count == 0)
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        else
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+
+        if (floatParamNames.Length == 0)
+            EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter to the controller first.", MessageType.Warning);
+        else
+            selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
+
+        EditorGUILayout.Space(6);
+        EditorGUILayout.LabelField("Decal Reveals (Poiyomi properties marked animated):", EditorStyles.boldLabel);
+
+        mainScrollPos = EditorGUILayout.BeginScrollView(mainScrollPos);
+
+        for (int i = 0; i < objects.Length; i++)
+        {
+            string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
+            var props = decalProps[i];
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+            foldoutStates[i] = EditorGUILayout.Foldout(
+                foldoutStates[i],
+                $"{parentName} | {objects[i].name}",
+                true,
+                EditorStyles.foldoutHeader);
+
+            if (foldoutStates[i])
+            {
+                EditorGUI.indentLevel++;
+
+                if (props.Count == 0)
+                {
+                    EditorGUILayout.HelpBox("No decal properties are marked animated on this mesh's material(s). It will be skipped.", MessageType.Warning);
+                }
+                else
+                {
+                    assetNames[i] = EditorGUILayout.TextField("Asset Name:", assetNames[i]);
+
+                    EditorGUILayout.Space(2);
+                    EditorGUILayout.LabelField($"Animated decal props ({props.Count}, reveal order):", EditorStyles.miniBoldLabel);
+                    for (int p = 0; p < props.Count; p++)
+                        EditorGUILayout.LabelField($"  {p + 1}. {props[p]}", EditorStyles.miniLabel);
+
+                    if (!string.IsNullOrEmpty(assetNames[i]))
+                    {
+                        EditorGUILayout.Space(2);
+                        EditorGUILayout.LabelField("Preview:", EditorStyles.miniBoldLabel);
+                        EditorGUILayout.LabelField($"  Param: Decals/{parentName}/{assetNames[i]}", EditorStyles.miniLabel);
+                        EditorGUILayout.LabelField($"  {props.Count + 1} clips: Decals.{parentName}.{assetNames[i]}.0 .. .{props.Count}", EditorStyles.miniLabel);
+                        EditorGUILayout.LabelField("  (cumulative: each step turns on one more decal property)", EditorStyles.miniLabel);
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+            }
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(2);
+        }
+
+        EditorGUILayout.EndScrollView();
+
+        GUILayout.FlexibleSpace();
+
+        // Bottom buttons
+        bool anyWithProps = decalProps.Any(p => p != null && p.Count > 0);
+        bool canCreate = directBlendTrees.Count > 0 && floatParamNames.Length > 0 && anyWithProps;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                AnimationGeneratorTool.ExecuteCreateDBTDecalReveal(
+                    objects,
+                    assetNames,
+                    detectedController,
+                    directBlendTrees[selectedTreeIndex],
+                    floatParamNames[selectedParamIndex]);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
+    }
+
+    private bool ValidateInputs()
+    {
+        for (int i = 0; i < objects.Length; i++)
+        {
+            if (decalProps[i].Count == 0) continue;  // skipped meshes don't need a name
+            if (string.IsNullOrEmpty(assetNames[i]))
+            {
+                EditorUtility.DisplayDialog("Error", $"Please enter an asset name for {objects[i].name}.", "OK");
+                return false;
+            }
+        }
+        return true;
     }
 }
