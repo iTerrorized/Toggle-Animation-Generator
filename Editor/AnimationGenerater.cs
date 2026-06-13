@@ -92,6 +92,15 @@ public class AnimationGeneratorTool
         CreateDBTDecalRevealWindow.Show(selected);
     }
 
+    [MenuItem("GameObject/Terrorized/Create DBT Group Decal Reveal", false, 19)]
+    private static void CreateDBTGroupDecalReveal(MenuCommand menuCommand)
+    {
+        if (menuCommand.context != Selection.activeObject) return;
+        GameObject[] selected = Selection.gameObjects;
+        if (selected == null || selected.Length == 0) return;
+        CreateDBTGroupDecalRevealWindow.Show(selected);
+    }
+
     private static void ShowNameDialog(System.Action<string> onConfirm)
     {
         AnimationNameWindow.Show(onConfirm);
@@ -817,12 +826,16 @@ public class AnimationGeneratorTool
 
     // ─── DBT Decal Reveal helpers ─────────────────────────────────────────────
 
-    // Reads a Poiyomi material's "marked animated" decal properties.
-    // Poiyomi/Thry stores the "animated" flag as a material string TAG "<Prop>Animated" = "1"
-    // (or "2" = animated when locked) in the material's stringTagMap — NOT as a float property —
-    // so we read it with Material.GetTag. We enumerate the shader's float/range DECAL properties
-    // and keep the ones whose Animated tag is set. Ordered by (decal index, alpha-before-hue, name).
-    public static List<string> FindAnimatedDecalProperties(Material mat)
+    // Returns the BASE names (e.g. "_DecalBlendAlpha", "_DecalHueShift1") of a Poiyomi material's
+    // decal properties marked animated, ordered by (decal index, alpha-before-hue, name).
+    //
+    // Poiyomi/Thry stores the "animated" flag as a material string TAG "<Base>Animated" = "1"
+    // ("2" = animated AND renamed when locked) in stringTagMap — keyed to the ORIGINAL name.
+    // On an unlocked material the shader property still uses that base name. On a LOCKED material
+    // Poiyomi renames the property to "<Base>_<suffix>" (e.g. "_DecalBlendAlpha_Eyes") while the tag
+    // stays keyed to the base — so we strip the rename suffix before checking the tag. Use
+    // ResolveBoundDecalProp to turn a base name into the actual property name to animate.
+    public static List<string> FindAnimatedDecalBaseProps(Material mat)
     {
         var results = new List<string>();
         if (mat == null || mat.shader == null) return results;
@@ -841,11 +854,18 @@ public class AnimationGeneratorTool
             string propName = ShaderUtil.GetPropertyName(shader, i);
             if (propName.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-            string tag = mat.GetTag(propName + "Animated", false, "");
-            if (tag != "1" && tag != "2") continue;  // "1" = animated, "2" = animated when locked
+            // Try the property name directly (unlocked), then with the lock-rename suffix stripped.
+            string baseName = propName;
+            if (!IsAnimatedTag(mat, baseName))
+            {
+                int li = propName.LastIndexOf('_');   // index 0 is the leading "_"; >0 means a suffix
+                if (li <= 0) continue;
+                baseName = propName.Substring(0, li);
+                if (!IsAnimatedTag(mat, baseName)) continue;
+            }
 
-            if (seen.Add(propName))
-                results.Add(propName);
+            if (seen.Add(baseName))
+                results.Add(baseName);
         }
 
         results.Sort((a, b) =>
@@ -858,6 +878,46 @@ public class AnimationGeneratorTool
         });
 
         return results;
+    }
+
+    // True if the material flags this base property as animated. "1" = animated,
+    // "2" = animated + renamed when locked (RA).
+    private static bool IsAnimatedTag(Material mat, string baseProp)
+    {
+        string tag = mat.GetTag(baseProp + "Animated", false, "");
+        return tag == "1" || tag == "2";
+    }
+
+    // True if the base property is tagged "2" (renamed-when-locked / RA).
+    public static bool IsRenamedAnimated(Material mat, string baseProp)
+    {
+        return mat != null && mat.GetTag(baseProp + "Animated", false, "") == "2";
+    }
+
+    // Turns a base property name into the actual shader property to animate on this material.
+    // Unlocked: the base name itself. Locked + renamed (RA): the "<Base>_<suffix>" property that
+    // Poiyomi generated. Falls back to the base name if nothing better is found.
+    public static string ResolveBoundDecalProp(Material mat, string baseProp)
+    {
+        if (mat == null) return baseProp;
+        if (mat.HasProperty(baseProp)) return baseProp;   // unlocked: original name is valid
+
+        var shader = mat.shader;
+        if (shader != null)
+        {
+            int count = ShaderUtil.GetPropertyCount(shader);
+            string prefix = baseProp + "_";
+            for (int i = 0; i < count; i++)
+            {
+                var ptype = ShaderUtil.GetPropertyType(shader, i);
+                if (ptype != ShaderUtil.ShaderPropertyType.Float && ptype != ShaderUtil.ShaderPropertyType.Range)
+                    continue;
+                string name = ShaderUtil.GetPropertyName(shader, i);
+                if (name.StartsWith(prefix, System.StringComparison.Ordinal))
+                    return name;
+            }
+        }
+        return baseProp;
     }
 
     // Trailing digits of a property name → decal index (no digits ⇒ 0). "_DecalHueShift1" → 1.
@@ -878,9 +938,10 @@ public class AnimationGeneratorTool
         return 2;
     }
 
-    // One reveal clip: the first `onCount` properties are driven to 1, the rest to 0 (constant).
+    // One reveal clip on a single renderer: the first `onCount` properties are driven to 1, the
+    // rest to 0 (constant). `boundProps` must be the resolved shader property names for `obj`.
     public static AnimationClip CreateDecalRevealAnimation(
-        GameObject obj, string clipName, List<string> props, int onCount)
+        GameObject obj, string clipName, List<string> boundProps, int onCount)
     {
         EnsureAssetFolder();
         string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
@@ -889,50 +950,86 @@ public class AnimationGeneratorTool
         AnimationClip clip = new AnimationClip();
         clip.name = clipName;
 
-        for (int j = 0; j < props.Count; j++)
-        {
-            float value = j < onCount ? 1f : 0f;
+        for (int j = 0; j < boundProps.Count; j++)
+            AddRevealCurve(clip, targetPath, boundProps[j], j < onCount ? 1f : 0f);
 
-            AnimationCurve curve = new AnimationCurve();
-            curve.AddKey(new Keyframe(0f, value));
-            AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
-            AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
-
-            EditorCurveBinding binding = EditorCurveBinding.FloatCurve(
-                targetPath, typeof(Renderer), "material." + props[j]);
-            AnimationUtility.SetEditorCurve(clip, binding, curve);
-        }
-
-        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
-        settings.loopTime = false;
-        AnimationUtility.SetAnimationClipSettings(clip, settings);
-
-        AssetDatabase.CreateAsset(clip, savePath);
+        FinalizeRevealClip(clip, savePath);
         return clip;
     }
 
-    // Collects the animated decal properties across every material on the SMR (deduped, ordered).
-    public static List<string> GetMeshAnimatedDecalProperties(GameObject obj)
+    // One reveal clip across MANY renderers (the group variant). `targets` is one entry per renderer
+    // holding that renderer's path and its resolved bound property names (same order as the base set).
+    public static AnimationClip CreateGroupDecalRevealAnimation(
+        string clipName, List<(string smrPath, List<string> boundProps)> targets, int onCount)
     {
-        var combined = new List<string>();
-        var seen = new HashSet<string>();
-        if (obj == null) return combined;
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
 
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        foreach (var (smrPath, boundProps) in targets)
+            for (int j = 0; j < boundProps.Count; j++)
+                AddRevealCurve(clip, smrPath, boundProps[j], j < onCount ? 1f : 0f);
+
+        FinalizeRevealClip(clip, savePath);
+        return clip;
+    }
+
+    private static void AddRevealCurve(AnimationClip clip, string targetPath, string boundProp, float value)
+    {
+        AnimationCurve curve = new AnimationCurve();
+        curve.AddKey(new Keyframe(0f, value));
+        AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+
+        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(
+            targetPath, typeof(Renderer), "material." + boundProp);
+        AnimationUtility.SetEditorCurve(clip, binding, curve);
+    }
+
+    private static void FinalizeRevealClip(AnimationClip clip, string savePath)
+    {
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+        AssetDatabase.CreateAsset(clip, savePath);
+    }
+
+    // Base animated decal props read from a specific material slot on the mesh.
+    public static List<string> GetMeshAnimatedDecalBaseProps(GameObject obj, int slot)
+    {
+        var mat = GetSlotMaterial(obj, slot);
+        return mat != null ? FindAnimatedDecalBaseProps(mat) : new List<string>();
+    }
+
+    public static Material GetSlotMaterial(GameObject obj, int slot)
+    {
+        if (obj == null) return null;
         var smr = obj.GetComponent<SkinnedMeshRenderer>();
-        if (smr == null) return combined;
+        if (smr == null) return null;
+        var mats = smr.sharedMaterials;
+        if (mats == null || mats.Length == 0) return null;
+        slot = Mathf.Clamp(slot, 0, mats.Length - 1);
+        return mats[slot];
+    }
 
-        foreach (var mat in smr.sharedMaterials)
-        {
-            foreach (var prop in FindAnimatedDecalProperties(mat))
-                if (seen.Add(prop))
-                    combined.Add(prop);
-        }
-        return combined;
+    // First material slot whose material has animated decal props, or 0 if none qualify.
+    public static int AutoDetectDecalSlot(GameObject obj)
+    {
+        if (obj == null) return 0;
+        var smr = obj.GetComponent<SkinnedMeshRenderer>();
+        if (smr == null) return 0;
+        var mats = smr.sharedMaterials;
+        for (int s = 0; s < mats.Length; s++)
+            if (FindAnimatedDecalBaseProps(mats[s]).Count > 0) return s;
+        return 0;
     }
 
     public static void ExecuteCreateDBTDecalReveal(
         GameObject[] objects,
         string[] assetNames,
+        int[] materialSlots,
         AnimatorController controller,
         BlendTree targetDBT,
         string dbtParameter)
@@ -949,7 +1046,7 @@ public class AnimationGeneratorTool
         {
             if (objects[i] == null) continue;
             if (objects[i].GetComponent<SkinnedMeshRenderer>() == null) continue;
-            if (GetMeshAnimatedDecalProperties(objects[i]).Count == 0) continue;
+            if (GetMeshAnimatedDecalBaseProps(objects[i], materialSlots[i]).Count == 0) continue;
 
             string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
             if (!groupIndex.TryGetValue(parentName, out int idx))
@@ -983,7 +1080,11 @@ public class AnimationGeneratorTool
 
             foreach (int i in itemIndices)
             {
-                var props = GetMeshAnimatedDecalProperties(objects[i]);
+                var slotMat = GetSlotMaterial(objects[i], materialSlots[i]);
+                var baseProps = FindAnimatedDecalBaseProps(slotMat);
+                // Resolve each base prop to the actual property to animate on this material
+                // (handles Poiyomi's lock-rename for RA props).
+                var boundProps = baseProps.Select(b => ResolveBoundDecalProp(slotMat, b)).ToList();
 
                 string assetName = assetNames[i];
                 string paramName = $"Decals/{category}/{assetName}";
@@ -993,8 +1094,8 @@ public class AnimationGeneratorTool
 
                 // Cumulative reveal: clip k turns on the first k properties (k = 0..N)
                 var clips = new List<AnimationClip>();
-                for (int k = 0; k <= props.Count; k++)
-                    clips.Add(CreateDecalRevealAnimation(objects[i], animBase + "." + k, props, k));
+                for (int k = 0; k <= boundProps.Count; k++)
+                    clips.Add(CreateDecalRevealAnimation(objects[i], animBase + "." + k, boundProps, k));
                 totalClips += clips.Count;
 
                 // Simple1D tree driven by the per-asset float parameter, thresholds 0..N
@@ -1034,6 +1135,93 @@ public class AnimationGeneratorTool
         EditorUtility.DisplayDialog(
             "Success",
             $"Created {totalAssets} decal reveal{(totalAssets == 1 ? "" : "s")} ({totalClips} clip{(totalClips == 1 ? "" : "s")}).",
+            "OK");
+    }
+
+    // ─── DBT Group Decal Reveal ───────────────────────────────────────────────
+
+    // One control (Simple1D + float param) drives the same cumulative decal reveal across every
+    // mesh that uses `sharedMaterial`. clip k turns on the first k animated decal props on all of
+    // them at once. Bound property names are resolved from the shared material (handles RA rename).
+    public static void ExecuteCreateDBTGroupDecalReveal(
+        GameObject[] objects,
+        string category,
+        string assetName,
+        Material sharedMaterial,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        string dbtParameter)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create DBT Group Decal Reveal");
+        Undo.RecordObject(targetDBT, "Create DBT Group Decal Reveal");
+
+        var baseProps = FindAnimatedDecalBaseProps(sharedMaterial);
+        if (baseProps.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Nothing Created",
+                "The selected material has no decal properties marked as animated.", "OK");
+            return;
+        }
+
+        // Every renderer (path) that uses the shared material gets the same reveal.
+        var slotMap = FindMaterialSlots(objects, null, sharedMaterial);
+        var smrPaths = slotMap.Select(p => p.smrPath).Distinct().ToList();
+        if (smrPaths.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Error",
+                "The selected material isn't on any of the selected meshes anymore.", "OK");
+            return;
+        }
+
+        var boundProps = baseProps.Select(b => ResolveBoundDecalProp(sharedMaterial, b)).ToList();
+        var targets = smrPaths.Select(p => (p, boundProps)).ToList();
+
+        EnsureAnimatorTrigger(controller, $"-----{category}-----");
+
+        BlendTree groupTree = new BlendTree();
+        groupTree.name = category;
+        groupTree.blendType = BlendTreeType.Direct;
+        groupTree.hideFlags = HideFlags.HideInHierarchy;
+        AssetDatabase.AddObjectToAsset(groupTree, controller);
+        Undo.RegisterCreatedObjectUndo(groupTree, "Create DBT Group Decal Reveal");
+
+        targetDBT.AddChild(groupTree);
+        var targetChildren = targetDBT.children;
+        targetChildren[targetChildren.Length - 1].directBlendParameter = dbtParameter;
+        targetDBT.children = targetChildren;
+
+        string paramName = $"Decals/{category}/{assetName}";
+        string animBase = $"Decals.{category}.{assetName}";
+        EnsureAnimatorParameter(controller, paramName);
+
+        var clips = new List<AnimationClip>();
+        for (int k = 0; k <= boundProps.Count; k++)
+            clips.Add(CreateGroupDecalRevealAnimation(animBase + "." + k, targets, k));
+
+        BlendTree oneDTree = new BlendTree();
+        oneDTree.name = assetName;
+        oneDTree.blendType = BlendTreeType.Simple1D;
+        oneDTree.blendParameter = paramName;
+        oneDTree.hideFlags = HideFlags.HideInHierarchy;
+        AssetDatabase.AddObjectToAsset(oneDTree, controller);
+        Undo.RegisterCreatedObjectUndo(oneDTree, "Create DBT Group Decal Reveal");
+
+        for (int m = 0; m < clips.Count; m++)
+            oneDTree.AddChild(clips[m], (float)m);
+
+        groupTree.AddChild(oneDTree);
+        var groupChildren = groupTree.children;
+        groupChildren[groupChildren.Length - 1].directBlendParameter = dbtParameter;
+        groupTree.children = groupChildren;
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog(
+            "Success",
+            $"Created group decal reveal '{category}/{assetName}' ({clips.Count} clips across {smrPaths.Count} mesh{(smrPaths.Count == 1 ? "" : "es")}).",
             "OK");
     }
 
@@ -2121,7 +2309,8 @@ public class CreateDBTDecalRevealWindow : EditorWindow
 {
     private GameObject[] objects;
     private string[] assetNames;
-    private List<string>[] decalProps;   // detected animated decal props per object (reveal order)
+    private int[] materialSlots;          // which material slot to read animated decals from
+    private List<string>[] decalProps;   // detected animated decal base props per object (reveal order)
     private bool[] foldoutStates;
 
     private Transform animatorRoot;
@@ -2151,13 +2340,15 @@ public class CreateDBTDecalRevealWindow : EditorWindow
         var valid = selectedObjects.Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null).ToArray();
         objects = valid;
         assetNames = new string[valid.Length];
+        materialSlots = new int[valid.Length];
         decalProps = new List<string>[valid.Length];
         foldoutStates = new bool[valid.Length];
 
         for (int i = 0; i < valid.Length; i++)
         {
             assetNames[i] = AnimationGeneratorTool.CleanDisplayName(valid[i].name);
-            decalProps[i] = AnimationGeneratorTool.GetMeshAnimatedDecalProperties(valid[i]);
+            materialSlots[i] = AnimationGeneratorTool.AutoDetectDecalSlot(valid[i]);
+            decalProps[i] = AnimationGeneratorTool.GetMeshAnimatedDecalBaseProps(valid[i], materialSlots[i]);
             foldoutStates[i] = true;
         }
 
@@ -2251,7 +2442,8 @@ public class CreateDBTDecalRevealWindow : EditorWindow
         for (int i = 0; i < objects.Length; i++)
         {
             string parentName = objects[i].transform.parent != null ? objects[i].transform.parent.name : "Root";
-            var props = decalProps[i];
+            var smr = objects[i].GetComponent<SkinnedMeshRenderer>();
+            var mats = smr.sharedMaterials;
 
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
@@ -2265,18 +2457,37 @@ public class CreateDBTDecalRevealWindow : EditorWindow
             {
                 EditorGUI.indentLevel++;
 
+                // Material slot picker (which slot's material to read animated decals from)
+                if (mats.Length > 1)
+                {
+                    string[] slotOptions = new string[mats.Length];
+                    for (int s = 0; s < mats.Length; s++)
+                        slotOptions[s] = $"[{s}] {(mats[s] != null ? mats[s].name : "(None)")}";
+                    int newSlot = EditorGUILayout.Popup("Material Slot:", materialSlots[i], slotOptions);
+                    if (newSlot != materialSlots[i])
+                    {
+                        materialSlots[i] = newSlot;
+                        decalProps[i] = AnimationGeneratorTool.GetMeshAnimatedDecalBaseProps(objects[i], newSlot);
+                    }
+                }
+
+                var props = decalProps[i];
                 if (props.Count == 0)
                 {
-                    EditorGUILayout.HelpBox("No decal properties are marked animated on this mesh's material(s). It will be skipped.", MessageType.Warning);
+                    EditorGUILayout.HelpBox("No decal properties are marked animated on the selected material slot. It will be skipped.", MessageType.Warning);
                 }
                 else
                 {
                     assetNames[i] = EditorGUILayout.TextField("Asset Name:", assetNames[i]);
 
+                    var slotMat = AnimationGeneratorTool.GetSlotMaterial(objects[i], materialSlots[i]);
                     EditorGUILayout.Space(2);
                     EditorGUILayout.LabelField($"Animated decal props ({props.Count}, reveal order):", EditorStyles.miniBoldLabel);
                     for (int p = 0; p < props.Count; p++)
-                        EditorGUILayout.LabelField($"  {p + 1}. {props[p]}", EditorStyles.miniLabel);
+                    {
+                        bool ra = AnimationGeneratorTool.IsRenamedAnimated(slotMat, props[p]);
+                        EditorGUILayout.LabelField($"  {p + 1}. {props[p]}{(ra ? "   (RA / renamed when locked)" : "")}", EditorStyles.miniLabel);
+                    }
 
                     if (!string.IsNullOrEmpty(assetNames[i]))
                     {
@@ -2310,6 +2521,7 @@ public class CreateDBTDecalRevealWindow : EditorWindow
                 AnimationGeneratorTool.ExecuteCreateDBTDecalReveal(
                     objects,
                     assetNames,
+                    materialSlots,
                     detectedController,
                     directBlendTrees[selectedTreeIndex],
                     floatParamNames[selectedParamIndex]);
@@ -2333,6 +2545,263 @@ public class CreateDBTDecalRevealWindow : EditorWindow
                 EditorUtility.DisplayDialog("Error", $"Please enter an asset name for {objects[i].name}.", "OK");
                 return false;
             }
+        }
+        return true;
+    }
+}
+
+public class CreateDBTGroupDecalRevealWindow : EditorWindow
+{
+    private GameObject[] objects;
+    private string categoryName = "";
+    private string assetName = "";
+
+    private List<Material> sharedMaterials = new List<Material>();
+    private int selectedSharedIndex = 0;
+    private List<string> decalProps = new List<string>();   // base props of the chosen shared material
+
+    private Transform animatorRoot;
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+    private int selectedParamIndex = 0;
+
+    private Vector2 mainScrollPos;
+
+    public static void Show(GameObject[] selectedObjects)
+    {
+        var window = CreateInstance<CreateDBTGroupDecalRevealWindow>();
+        window.Initialize(selectedObjects);
+        window.titleContent = new GUIContent("Create DBT Group Decal Reveal");
+        window.minSize = new Vector2(560, 600);
+        window.ShowUtility();
+    }
+
+    private void Initialize(GameObject[] selectedObjects)
+    {
+        var valid = selectedObjects.Where(o => o != null && o.GetComponent<SkinnedMeshRenderer>() != null).ToArray();
+        objects = valid;
+
+        // Default category = common parent name if all selected share one
+        if (valid.Length > 0)
+        {
+            string firstParent = valid[0].transform.parent != null ? valid[0].transform.parent.name : "";
+            bool allSame = true;
+            for (int i = 1; i < valid.Length; i++)
+            {
+                string p = valid[i].transform.parent != null ? valid[i].transform.parent.name : "";
+                if (p != firstParent) { allSame = false; break; }
+            }
+            if (allSame && !string.IsNullOrEmpty(firstParent))
+                categoryName = firstParent;
+        }
+
+        sharedMaterials = AnimationGeneratorTool.FindSharedMaterials(valid);
+        RefreshDecalProps();
+
+        DetectAnimator(selectedObjects);
+    }
+
+    private void RefreshDecalProps()
+    {
+        if (sharedMaterials.Count == 0) { decalProps = new List<string>(); return; }
+        selectedSharedIndex = Mathf.Clamp(selectedSharedIndex, 0, sharedMaterials.Count - 1);
+        decalProps = AnimationGeneratorTool.FindAnimatedDecalBaseProps(sharedMaterials[selectedSharedIndex]);
+    }
+
+    private void DetectAnimator(GameObject[] sourceObjects)
+    {
+        if (sourceObjects == null || sourceObjects.Length == 0) return;
+
+        Transform current = sourceObjects[0].transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                animatorRoot = current;
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+        selectedParamIndex = Mathf.Clamp(selectedParamIndex, 0, Mathf.Max(0, floatParamNames.Length - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create DBT Group Decal Reveal", EditorStyles.boldLabel);
+        EditorGUILayout.Space(4);
+
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. Selected objects must be under an Animator.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        if (objects == null || objects.Length == 0)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox("None of the selected objects have a SkinnedMeshRenderer.", MessageType.Error);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        if (directBlendTrees.Count == 0)
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        else
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+
+        if (floatParamNames.Length == 0)
+            EditorGUILayout.HelpBox("No Float parameters found. Add a Float parameter to the controller first.", MessageType.Warning);
+        else
+            selectedParamIndex = EditorGUILayout.Popup("DBT Parameter:", selectedParamIndex, floatParamNames);
+
+        EditorGUILayout.Space(6);
+
+        // Naming
+        EditorGUILayout.LabelField("Naming:", EditorStyles.boldLabel);
+        categoryName = EditorGUILayout.TextField("Category:", categoryName);
+        assetName    = EditorGUILayout.TextField("Name:",     assetName);
+
+        EditorGUILayout.Space(6);
+
+        // Targets
+        EditorGUILayout.LabelField($"Targets ({objects.Length}):", EditorStyles.boldLabel);
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        foreach (var go in objects)
+        {
+            string parent = go.transform.parent != null ? go.transform.parent.name : "Root";
+            EditorGUILayout.LabelField($"{parent} | {go.name}", EditorStyles.miniLabel);
+        }
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.Space(6);
+
+        // Shared material selector
+        EditorGUILayout.LabelField("Shared Material (read decals from):", EditorStyles.boldLabel);
+        if (sharedMaterials.Count == 0)
+        {
+            EditorGUILayout.HelpBox("No materials are shared across all selected meshes.", MessageType.Warning);
+        }
+        else
+        {
+            string[] options = sharedMaterials.Select(m => m != null ? m.name : "(None)").ToArray();
+            int newIndex = EditorGUILayout.Popup("Material:", selectedSharedIndex, options);
+            if (newIndex != selectedSharedIndex)
+            {
+                selectedSharedIndex = newIndex;
+                RefreshDecalProps();
+            }
+        }
+
+        EditorGUILayout.Space(6);
+
+        // Detected animated decal props on the chosen material
+        mainScrollPos = EditorGUILayout.BeginScrollView(mainScrollPos);
+        if (sharedMaterials.Count > 0)
+        {
+            var mat = sharedMaterials[selectedSharedIndex];
+            if (decalProps.Count == 0)
+            {
+                EditorGUILayout.HelpBox("This material has no decal properties marked animated.", MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.LabelField($"Animated decal props ({decalProps.Count}, reveal order):", EditorStyles.miniBoldLabel);
+                for (int p = 0; p < decalProps.Count; p++)
+                {
+                    bool ra = AnimationGeneratorTool.IsRenamedAnimated(mat, decalProps[p]);
+                    EditorGUILayout.LabelField($"  {p + 1}. {decalProps[p]}{(ra ? "   (RA / renamed when locked)" : "")}", EditorStyles.miniLabel);
+                }
+
+                if (!string.IsNullOrEmpty(categoryName) && !string.IsNullOrEmpty(assetName))
+                {
+                    EditorGUILayout.Space(2);
+                    EditorGUILayout.LabelField("Preview:", EditorStyles.miniBoldLabel);
+                    EditorGUILayout.LabelField($"  Param: Decals/{categoryName}/{assetName}", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField($"  {decalProps.Count + 1} clips driving every mesh that uses this material together.", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField("  (cumulative: each step turns on one more decal property)", EditorStyles.miniLabel);
+                }
+            }
+        }
+        EditorGUILayout.EndScrollView();
+
+        GUILayout.FlexibleSpace();
+
+        bool canCreate = directBlendTrees.Count > 0 && floatParamNames.Length > 0
+                         && sharedMaterials.Count > 0 && decalProps.Count > 0;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                AnimationGeneratorTool.ExecuteCreateDBTGroupDecalReveal(
+                    objects,
+                    categoryName,
+                    assetName,
+                    sharedMaterials[selectedSharedIndex],
+                    detectedController,
+                    directBlendTrees[selectedTreeIndex],
+                    floatParamNames[selectedParamIndex]);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
+    }
+
+    private bool ValidateInputs()
+    {
+        if (string.IsNullOrEmpty(categoryName))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter a category name.", "OK");
+            return false;
+        }
+        if (string.IsNullOrEmpty(assetName))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter an asset name.", "OK");
+            return false;
+        }
+        if (decalProps.Count == 0)
+        {
+            EditorUtility.DisplayDialog("Error", "The selected material has no decal properties marked animated.", "OK");
+            return false;
         }
         return true;
     }

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-06-12
+
+### Added
+
+- **Create DBT Group Decal Reveal**: one control drives the same cumulative decal reveal across every mesh that uses a shared material.
+- **Material slot picker** in Create DBT Decal Reveal — choose which material slot to read animated decals from.
+
+### Changed
+
+- Decal detection now supports **RA (Renamed when locked)** properties: `"2"`-tagged props are detected, shown as `(RA)`, and animations bind to Poiyomi's renamed property (`_Prop_<suffix>`) on locked materials.
+
 ## [1.0.7] - 2026-06-12
 
 ### Fixed
