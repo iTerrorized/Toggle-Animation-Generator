@@ -854,15 +854,8 @@ public class AnimationGeneratorTool
             string propName = ShaderUtil.GetPropertyName(shader, i);
             if (propName.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-            // Try the property name directly (unlocked), then with the lock-rename suffix stripped.
-            string baseName = propName;
-            if (!IsAnimatedTag(mat, baseName))
-            {
-                int li = propName.LastIndexOf('_');   // index 0 is the leading "_"; >0 means a suffix
-                if (li <= 0) continue;
-                baseName = propName.Substring(0, li);
-                if (!IsAnimatedTag(mat, baseName)) continue;
-            }
+            string baseName = RecoverAnimatedBase(mat, propName);
+            if (baseName == null) continue;
 
             if (seen.Add(baseName))
                 results.Add(baseName);
@@ -886,6 +879,26 @@ public class AnimationGeneratorTool
     {
         string tag = mat.GetTag(baseProp + "Animated", false, "");
         return tag == "1" || tag == "2";
+    }
+
+    // Recovers the original base property name for a (possibly lock-renamed) shader property, or
+    // null if it isn't marked animated. Unlocked: the name itself carries the "<name>Animated" tag.
+    // Locked: Poiyomi renames the property to "<base>_<suffix>" where the suffix is the material's
+    // name (or a custom rename suffix) and MAY contain underscores (e.g. "_DecalBlendAlpha_B_Hair_Streak").
+    // The Animated tag stays keyed to the base, so we test every "<base>_" boundary from shortest up
+    // and keep the first whose tag is set.
+    private static string RecoverAnimatedBase(Material mat, string propName)
+    {
+        if (IsAnimatedTag(mat, propName)) return propName;   // unlocked / original name
+
+        for (int k = 1; k < propName.Length; k++)
+        {
+            if (propName[k] != '_') continue;                 // only split on underscore boundaries
+            string candidate = propName.Substring(0, k);
+            if (candidate.Length > 1 && IsAnimatedTag(mat, candidate))
+                return candidate;
+        }
+        return null;
     }
 
     // True if the base property is tagged "2" (renamed-when-locked / RA).

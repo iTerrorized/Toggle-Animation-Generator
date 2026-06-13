@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-06-12
+
+### Fixed
+
+- RA (renamed-when-locked) decal detection now handles material names that contain underscores (e.g. `_DecalBlendAlpha_B_Hair_Streak`). The base property is recovered by testing every `_` boundary instead of stripping only the last segment, so locked materials are detected correctly.
+
 ## [1.0.8] - 2026-06-12
 
 ### Added
