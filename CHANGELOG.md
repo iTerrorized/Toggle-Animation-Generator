@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.10] - 2026-06-26
+
+### Added
+
+- **Create DBT Blendshape Toggle**: right-click any blendshape in a SkinnedMeshRenderer's BlendShapes section and choose *Create DBT Blendshape Toggle*. A small dialog asks for the animation **Prefix**, the **Name**, the **Parameter** to drive the toggle, the **Direct Blend Tree** to place it in, and whether **100 = On or 100 = Off**, then builds the On/Off clips and a Simple1D toggle wired under the chosen tree. The Direct (weight) parameter is reused from the chosen tree's existing children automatically.
+
 ## [1.0.9] - 2026-06-12
 
 ### Fixed

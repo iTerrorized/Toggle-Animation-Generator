@@ -498,6 +498,131 @@ public class AnimationGeneratorTool
         EditorUtility.DisplayDialog("Success", "DBT Toggles created successfully!", "OK");
     }
 
+    // ─── DBT Blendshape Toggle (single blendshape, from right-click) ───────────
+
+    // The float parameter a Direct Blend Tree already uses as the "always-on" weight for its
+    // children. Returns the most common directBlendParameter among the tree's direct children,
+    // or null if the tree has no children with one set yet.
+    public static string DetectDirectBlendParameter(BlendTree directTree)
+    {
+        if (directTree == null) return null;
+        var counts = new Dictionary<string, int>();
+        foreach (var child in directTree.children)
+        {
+            string p = child.directBlendParameter;
+            if (string.IsNullOrEmpty(p)) continue;
+            counts[p] = counts.TryGetValue(p, out int n) ? n + 1 : 1;
+        }
+        if (counts.Count == 0) return null;
+
+        string best = null; int bestCount = -1;
+        foreach (var kv in counts)
+            if (kv.Value > bestCount) { best = kv.Key; bestCount = kv.Value; }
+        return best;
+    }
+
+    // Resolves the weight (directBlendParameter) for a new child of `targetDBT`: reuse the tree's
+    // existing convention, else any other Float param on the controller, else "1" (the caller is
+    // responsible for ensuring the returned parameter exists). Never mutates anything.
+    public static string ResolveDirectWeightParameter(AnimatorController controller, BlendTree targetDBT, string toggleParameter)
+    {
+        string weight = DetectDirectBlendParameter(targetDBT);
+        if (!string.IsNullOrEmpty(weight)) return weight;
+
+        if (controller != null)
+            foreach (var p in controller.parameters)
+                if (p.type == AnimatorControllerParameterType.Float && p.name != toggleParameter)
+                    return p.name;
+
+        return "1";
+    }
+
+    // One-frame clip that drives a single blendshape weight (0..100) on one SkinnedMeshRenderer.
+    public static AnimationClip CreateBlendshapeWeightAnimation(
+        string clipName, string smrPath, string shapeName, float weight)
+    {
+        EnsureAssetFolder();
+        string savePath = Path.Combine(ASSET_FOLDER, clipName + ".anim");
+
+        AnimationClip clip = new AnimationClip();
+        clip.name = clipName;
+
+        AnimationCurve curve = new AnimationCurve();
+        curve.AddKey(new Keyframe(0f, weight));
+        AnimationUtility.SetKeyLeftTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+        AnimationUtility.SetKeyRightTangentMode(curve, 0, AnimationUtility.TangentMode.Constant);
+
+        EditorCurveBinding binding = EditorCurveBinding.FloatCurve(smrPath, typeof(SkinnedMeshRenderer), "blendShape." + shapeName);
+        AnimationUtility.SetEditorCurve(clip, binding, curve);
+
+        AnimationClipSettings settings = AnimationUtility.GetAnimationClipSettings(clip);
+        settings.loopTime = false;
+        AnimationUtility.SetAnimationClipSettings(clip, settings);
+
+        AssetDatabase.CreateAsset(clip, savePath);
+        return clip;
+    }
+
+    // Builds a Simple1D On/Off toggle for one blendshape and wires it under the chosen Direct
+    // Blend Tree. The toggle parameter drives 0 (Off) → 1 (On); `hundredIsOn` chooses whether the
+    // blendshape's 100 weight represents the On state (true) or the Off state (false).
+    public static void ExecuteCreateDBTBlendshapeToggle(
+        SkinnedMeshRenderer smr,
+        string shapeName,
+        string prefix,
+        string toggleName,
+        string toggleParameter,
+        AnimatorController controller,
+        BlendTree targetDBT,
+        bool hundredIsOn)
+    {
+        EnsureAssetFolder();
+        Undo.RecordObject(controller, "Create DBT Blendshape Toggle");
+        Undo.RecordObject(targetDBT, "Create DBT Blendshape Toggle");
+
+        string smrPath = GetGameObjectPath(smr.gameObject);
+
+        EnsureAnimatorParameter(controller, toggleParameter);
+        string weightParam = ResolveDirectWeightParameter(controller, targetDBT, toggleParameter);
+        EnsureAnimatorParameter(controller, weightParam);
+
+        float onWeight  = hundredIsOn ? 100f : 0f;
+        float offWeight = hundredIsOn ? 0f   : 100f;
+
+        string animBase = prefix + toggleName;
+        AnimationClip offClip = CreateBlendshapeWeightAnimation(animBase + "Off", smrPath, shapeName, offWeight);
+        AnimationClip onClip  = CreateBlendshapeWeightAnimation(animBase + "On",  smrPath, shapeName, onWeight);
+
+        BlendTree oneDTree = new BlendTree();
+        oneDTree.name = toggleName;
+        oneDTree.blendType = BlendTreeType.Simple1D;
+        oneDTree.blendParameter = toggleParameter;
+        oneDTree.hideFlags = HideFlags.HideInHierarchy;
+        AssetDatabase.AddObjectToAsset(oneDTree, controller);
+        Undo.RegisterCreatedObjectUndo(oneDTree, "Create DBT Blendshape Toggle");
+
+        oneDTree.AddChild(offClip, 0f);
+        oneDTree.AddChild(onClip, 1f);
+
+        targetDBT.AddChild(oneDTree);
+        var children = targetDBT.children;
+        children[children.Length - 1].directBlendParameter = weightParam;
+        targetDBT.children = children;
+
+        EditorUtility.SetDirty(controller);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        EditorUtility.DisplayDialog(
+            "Success",
+            $"Created blendshape toggle '{toggleName}'.\n\n" +
+            $"Blendshape: {shapeName}\n" +
+            $"Toggle param: {toggleParameter}\n" +
+            $"Weight param: {weightParam}\n" +
+            $"100 = {(hundredIsOn ? "On" : "Off")}",
+            "OK");
+    }
+
     // ─── DBT Material Swap helpers ────────────────────────────────────────────
 
     public static AnimationClip CreateMaterialSwapAnimation(
@@ -2814,6 +2939,232 @@ public class CreateDBTGroupDecalRevealWindow : EditorWindow
         if (decalProps.Count == 0)
         {
             EditorUtility.DisplayDialog("Error", "The selected material has no decal properties marked animated.", "OK");
+            return false;
+        }
+        return true;
+    }
+}
+
+// Adds a "Create DBT Blendshape Toggle" entry to the right-click context menu of any blendshape
+// weight in a SkinnedMeshRenderer's BlendShapes section of the Inspector.
+[InitializeOnLoad]
+public static class BlendshapeToggleContextMenu
+{
+    static BlendshapeToggleContextMenu()
+    {
+        EditorApplication.contextualPropertyMenu -= OnPropertyContextMenu;
+        EditorApplication.contextualPropertyMenu += OnPropertyContextMenu;
+    }
+
+    private static void OnPropertyContextMenu(GenericMenu menu, SerializedProperty property)
+    {
+        var smr = property.serializedObject.targetObject as SkinnedMeshRenderer;
+        if (smr == null) return;
+
+        int index = ParseBlendShapeIndex(property.propertyPath);
+        if (index < 0) return;
+
+        var mesh = smr.sharedMesh;
+        if (mesh == null || index >= mesh.blendShapeCount) return;
+
+        string shapeName = mesh.GetBlendShapeName(index);
+
+        menu.AddItem(new GUIContent("Create DBT Blendshape Toggle"), false, () =>
+            CreateDBTBlendshapeToggleWindow.Show(smr, shapeName));
+    }
+
+    // Blendshape index for a "m_BlendShapeWeights.Array.data[N]" property path, else -1.
+    private static int ParseBlendShapeIndex(string propertyPath)
+    {
+        const string prefix = "m_BlendShapeWeights.Array.data[";
+        if (string.IsNullOrEmpty(propertyPath)) return -1;
+        if (!propertyPath.StartsWith(prefix) || !propertyPath.EndsWith("]")) return -1;
+        string inner = propertyPath.Substring(prefix.Length, propertyPath.Length - prefix.Length - 1);
+        return int.TryParse(inner, out int idx) ? idx : -1;
+    }
+}
+
+public class CreateDBTBlendshapeToggleWindow : EditorWindow
+{
+    private SkinnedMeshRenderer smr;
+    private string shapeName;
+
+    private string prefix = "";
+    private string toggleName = "";
+    private string toggleParameter = "";
+    private bool hundredIsOn = true;   // true: weight 100 = On, false: weight 100 = Off
+
+    private AnimatorController detectedController;
+
+    private List<BlendTree> directBlendTrees = new List<BlendTree>();
+    private List<string> directBlendTreeLabels = new List<string>();
+    private int selectedTreeIndex = 0;
+
+    private string[] floatParamNames = new string[0];
+
+    public static void Show(SkinnedMeshRenderer renderer, string blendShapeName)
+    {
+        var window = CreateInstance<CreateDBTBlendshapeToggleWindow>();
+        window.Initialize(renderer, blendShapeName);
+        window.titleContent = new GUIContent("Create DBT Blendshape Toggle");
+        window.minSize = new Vector2(440, 380);
+        window.ShowUtility();
+    }
+
+    private void Initialize(SkinnedMeshRenderer renderer, string blendShapeName)
+    {
+        smr = renderer;
+        shapeName = blendShapeName;
+        toggleName = AnimationGeneratorTool.CleanDisplayName(blendShapeName);
+        toggleParameter = toggleName;
+        DetectAnimator();
+    }
+
+    private void DetectAnimator()
+    {
+        if (smr == null) return;
+
+        Transform current = smr.transform;
+        while (current != null)
+        {
+            var animator = current.GetComponent<Animator>();
+            if (animator != null)
+            {
+                detectedController = animator.runtimeAnimatorController as AnimatorController;
+                break;
+            }
+            current = current.parent;
+        }
+
+        if (detectedController != null)
+            RefreshControllerData();
+    }
+
+    private void RefreshControllerData()
+    {
+        var found = AnimationGeneratorTool.FindDirectBlendTrees(detectedController);
+        directBlendTrees = found.Select(x => x.tree).ToList();
+        directBlendTreeLabels = found.Select(x => x.label).ToList();
+
+        floatParamNames = detectedController.parameters
+            .Where(p => p.type == AnimatorControllerParameterType.Float)
+            .Select(p => p.name)
+            .ToArray();
+
+        selectedTreeIndex = Mathf.Clamp(selectedTreeIndex, 0, Mathf.Max(0, directBlendTrees.Count - 1));
+    }
+
+    private void OnGUI()
+    {
+        EditorGUILayout.LabelField("Create DBT Blendshape Toggle", EditorStyles.boldLabel);
+        EditorGUILayout.Space(4);
+
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.LabelField("Blendshape: " + shapeName, EditorStyles.miniBoldLabel);
+        if (detectedController != null)
+            EditorGUILayout.LabelField("Controller: " + detectedController.name, EditorStyles.miniLabel);
+        else
+            EditorGUILayout.HelpBox("No AnimatorController found. The mesh must be under an Animator with a controller.", MessageType.Error);
+        EditorGUILayout.EndVertical();
+
+        if (detectedController == null)
+        {
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Cancel", GUILayout.Height(30))) Close();
+            return;
+        }
+
+        EditorGUILayout.Space(4);
+
+        // Direct Blend Tree to place the toggle in
+        if (directBlendTrees.Count == 0)
+            EditorGUILayout.HelpBox("No Direct Blend Trees found in the controller.", MessageType.Warning);
+        else
+            selectedTreeIndex = EditorGUILayout.Popup("Direct Blend Tree:", selectedTreeIndex, directBlendTreeLabels.ToArray());
+
+        EditorGUILayout.Space(6);
+
+        // Naming
+        EditorGUILayout.LabelField("Naming:", EditorStyles.boldLabel);
+        prefix     = EditorGUILayout.TextField("Prefix:", prefix);
+        toggleName = EditorGUILayout.TextField("Name:",   toggleName);
+
+        EditorGUILayout.Space(6);
+
+        // Parameter to use (free text; optionally fill from an existing Float param)
+        EditorGUILayout.LabelField("Parameter:", EditorStyles.boldLabel);
+        toggleParameter = EditorGUILayout.TextField("Parameter:", toggleParameter);
+        if (floatParamNames.Length > 0)
+        {
+            string[] pickOptions = new string[floatParamNames.Length + 1];
+            pickOptions[0] = "(fill from existing Float param...)";
+            for (int i = 0; i < floatParamNames.Length; i++) pickOptions[i + 1] = floatParamNames[i];
+            int picked = EditorGUILayout.Popup(" ", 0, pickOptions);
+            if (picked > 0) toggleParameter = floatParamNames[picked - 1];
+        }
+
+        EditorGUILayout.Space(6);
+
+        // Polarity
+        EditorGUILayout.LabelField("Blendshape Polarity:", EditorStyles.boldLabel);
+        int polarity = hundredIsOn ? 0 : 1;
+        polarity = EditorGUILayout.Popup("Weight 100 means:", polarity, new[] { "100 = On", "100 = Off" });
+        hundredIsOn = polarity == 0;
+
+        EditorGUILayout.Space(8);
+
+        // Preview
+        if (!string.IsNullOrEmpty(toggleName))
+        {
+            BlendTree previewTree = directBlendTrees.Count > 0 ? directBlendTrees[selectedTreeIndex] : null;
+            string weightParam = AnimationGeneratorTool.ResolveDirectWeightParameter(detectedController, previewTree, toggleParameter);
+
+            EditorGUILayout.LabelField("Preview:", EditorStyles.boldLabel);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField($"Toggle param: {toggleParameter}", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"Weight (Direct) param: {weightParam}", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"Clips: {prefix}{toggleName}On.anim, {prefix}{toggleName}Off.anim", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField($"On → {shapeName} = {(hundredIsOn ? 100 : 0)}    Off → {shapeName} = {(hundredIsOn ? 0 : 100)}", EditorStyles.miniLabel);
+            EditorGUILayout.EndVertical();
+        }
+
+        GUILayout.FlexibleSpace();
+
+        bool canCreate = directBlendTrees.Count > 0;
+        EditorGUILayout.BeginHorizontal();
+        GUI.enabled = canCreate;
+        if (GUILayout.Button("Create", GUILayout.Height(30)))
+        {
+            if (ValidateInputs())
+            {
+                AnimationGeneratorTool.ExecuteCreateDBTBlendshapeToggle(
+                    smr, shapeName, prefix, toggleName, toggleParameter,
+                    detectedController, directBlendTrees[selectedTreeIndex], hundredIsOn);
+                Close();
+            }
+        }
+        GUI.enabled = true;
+        if (GUILayout.Button("Cancel", GUILayout.Height(30)))
+            Close();
+        EditorGUILayout.EndHorizontal();
+        EditorGUILayout.Space(4);
+    }
+
+    private bool ValidateInputs()
+    {
+        if (smr == null || string.IsNullOrEmpty(shapeName))
+        {
+            EditorUtility.DisplayDialog("Error", "The blendshape reference is no longer valid.", "OK");
+            return false;
+        }
+        if (string.IsNullOrEmpty(toggleName))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter a name.", "OK");
+            return false;
+        }
+        if (string.IsNullOrEmpty(toggleParameter))
+        {
+            EditorUtility.DisplayDialog("Error", "Please enter a parameter to use.", "OK");
             return false;
         }
         return true;
